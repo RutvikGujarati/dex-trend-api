@@ -18,10 +18,17 @@ const API_KEY = process.env.ONEINCH_API_KEY;
 // Middleware
 app.use(express.json());
 app.use(cors({
-    origin: ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:3001'],
+    origin: [
+        'http://localhost:3000',
+        'http://localhost:5173',
+        'http://localhost:3001',
+        'https://dex-trend.com',
+        'https://www.dex-trend.com'
+    ],
     methods: ['GET', 'POST'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
 
 
 // 1inch quote proxy endpoint
