@@ -7,133 +7,93 @@ const require = createRequire(import.meta.url);
 
 const ABI = require("./ABI.json");
 const POOL_ABI = require("./PoolABI.json");
-import { FEE_TIERS, FACTORY_ABI, FACTORY_ADDRESS } from "./constants.js";
+import { FACTORY_ABI, FACTORY_ADDRESS } from "./constants.js";
 
 const RPC_URL = "https://api.skyhighblockchain.com";
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const FIXED_FEE = 500; // Fixed fee tier
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
-// executor contract
-const EXECUTOR_ADDRESS = "0xB25202f5748116bC5A5e9eB3fCaBC7d5b5777996";
+// Executor contract
+const EXECUTOR_ADDRESS = "0x10e9c43B9Fbf78ca0d83515AE36D360110e4331d";
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, ABI.abi, wallet);
 
-// pool helpers
-async function getPoolInfo(tokenA, tokenB, fee) {
+// Get current price ratio from pool (both tokens have 18 decimals)
+async function getCurrentRatio(tokenA, tokenB) {
     const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
-    const poolAddress = await factory.getPool(tokenA, tokenB, fee);
+    const poolAddress = await factory.getPool(tokenA, tokenB, FIXED_FEE);
 
-    if (poolAddress === ethers.ZeroAddress) return null;
-    const poolContract = new ethers.Contract(poolAddress, POOL_ABI.abi, provider);
-    const [slot0Data, liquidity, token0, token1] = await Promise.all([
-        poolContract.slot0(),
-        poolContract.liquidity(),
-        poolContract.token0(),
-        poolContract.token1(),
-    ]);
-
-    return {
-        address: poolAddress,
-        fee,
-        liquidity: liquidity.toString(),
-        sqrtPriceX96: slot0Data.sqrtPriceX96.toString(),
-        token0,
-        token1,
-    };
-}
-
-async function getTokenRatio(tokenA, tokenB, fee) {
-    const poolInfo = await getPoolInfo(tokenA, tokenB, fee);
-    if (!poolInfo) throw new Error("Pool not found");
-
-    const sqrtPriceX96 = BigInt(poolInfo.sqrtPriceX96);
-    const priceX192 = sqrtPriceX96 * sqrtPriceX96; // Q128.192
-    const price = Number(priceX192) / Number(1n << 192n);
-
-    const decimalsA = 6;
-    const decimalsB = 6;
-
-    let ratio;
-    if (poolInfo.token0.toLowerCase() === tokenA.toLowerCase()) {
-        ratio = price * 10 ** (decimalsA - decimalsB);
-    } else {
-        ratio = (1 / price) * 10 ** (decimalsB - decimalsA);
+    if (poolAddress === ethers.ZeroAddress) {
+        throw new Error("Pool not found");
     }
 
-    return ratio;
+    const poolContract = new ethers.Contract(poolAddress, POOL_ABI.abi, provider);
+    const slot0 = await poolContract.slot0();
+    const token0 = await poolContract.token0();
+
+    const sqrtPriceX96 = BigInt(slot0.sqrtPriceX96);
+    const priceX192 = sqrtPriceX96 * sqrtPriceX96;
+    const price = Number(priceX192) / Number(1n << 192n);
+
+    // Return ratio (decimals cancel out since both are 18)
+    return token0.toLowerCase() === tokenA.toLowerCase() ? price : 1 / price;
 }
-const USDC = "0x654684135feea7fd632754d05e15f9886ec7bf28";
-const USDT = "0x8df8262960065c242c66efd42eacfb6ad971f962";
-// main monitor
+
+// Main monitor loop
 async function monitorOrders(intervalMs = 10000) {
     console.log("🔎 Order monitor started...");
 
     while (true) {
         try {
-            const ratio = await getTokenRatio(USDC, USDT, 500); 
-            console.log(`💱 USDC/USDT ratio: ${ratio}`);
-            const nextIdBN = await executor.nextOrderId();
-            const nextId = Number(nextIdBN);
-
-            console.log(`📌 Checking ${nextId - 1} potential orders`);
+            const nextId = Number(await executor.nextOrderId());
+            console.log(`📌 Checking ${nextId - 1} orders`);
 
             for (let orderId = 1; orderId < nextId; orderId++) {
                 try {
-                    const ord = await executor.getOrder(orderId);
+                    const order = await executor.getOrder(orderId);
 
-                    if (ord.filled) {
-                        console.log(`⏭️  Order ${orderId} already filled`);
-                        continue;
-                    }
-                    if (ord.cancelled) {
-                        console.log(`⏭️  Order ${orderId} cancelled`);
-                        continue;
-                    }
-                    if (Number(ord.expiry) < Math.floor(Date.now() / 1000)) {
-                        console.log(`⏭️  Order ${orderId} expired`);
-                        continue;
-                    }
+                    // Skip if filled, cancelled, or expired
+                    if (order.filled || order.cancelled) continue;
+                    if (Number(order.expiry) < Math.floor(Date.now() / 1000)) continue;
 
-                    // fetch current pool sqrtPrice
-                    const poolInfo = await getPoolInfo(ord.tokenIn, ord.tokenOut, ord.poolFee);
-                    if (!poolInfo) {
-                        console.log(`⚠️  No pool found for order ${orderId}`);
-                        continue;
-                    }
+                    // Get current and target ratios
+                    const currentRatio = await getCurrentRatio(order.tokenIn, order.tokenOut);
+                    const targetRatio = Number(ethers.formatUnits(order.targetSqrtPriceX96, 18));
 
-                    const currentRatio = await getTokenRatio(ord.tokenIn, ord.tokenOut, ord.poolFee);
-                    const targetRatio = Number(ord.targetSqrtPriceX96) / 1e18; // store target scaled 1e18
-                    const cond = ord.triggerAbove ? currentRatio >= targetRatio : currentRatio <= targetRatio;
+                    // Check if condition is met
+                    const conditionMet = order.triggerAbove
+                        ? currentRatio >= targetRatio
+                        : currentRatio <= targetRatio;
 
                     console.log(
-                        `Order ${orderId} | CurrentRatio=${currentRatio} | Target=${targetRatio} | ConditionMet=${cond}`
+                        `Order ${orderId} | Current: ${currentRatio.toFixed(6)} | Target: ${targetRatio.toFixed(6)} | Met: ${conditionMet}`
                     );
 
-                    if (cond) {
-                        console.log(`✅ Executing order ${orderId}...`);
+                    if (conditionMet) {
+                        console.log(`⚡ Executing order ${orderId}...`);
                         const tx = await executor.executeOrder(orderId, { gasLimit: 500000 });
                         console.log(`⛽ Tx sent: ${tx.hash}`);
                         const receipt = await tx.wait();
-                        console.log(`🎉 Order ${orderId} executed in block ${receipt.blockNumber}`);
+                        console.log(`✅ Order ${orderId} executed in block ${receipt.blockNumber}`);
                     }
-                } catch (innerErr) {
-                    console.error(`❌ Error processing order ${orderId}:`, innerErr.message);
+                } catch (err) {
+                    console.error(`❌ Error processing order ${orderId}:`, err.message);
                 }
             }
         } catch (err) {
-            console.error("🚨 Monitor error (outer loop):", err.message);
+            console.error("🚨 Monitor error:", err.message);
         }
 
-        await new Promise((res) => setTimeout(res, intervalMs)); // poll interval
+        await new Promise((res) => setTimeout(res, intervalMs));
     }
 }
 
-
-// start monitor in background
+// Start monitor
 monitorOrders();
 
-// --- Express server ---
+// Express API
 const app = express();
 const PORT = process.env.PORT || 4000;
 
