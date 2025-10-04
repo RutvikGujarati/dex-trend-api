@@ -5,8 +5,8 @@ import dotenv from "dotenv";
 dotenv.config();
 const require = createRequire(import.meta.url);
 
-const ABI = require("./ABI.json");
-const POOL_ABI = require("./PoolABI.json");
+const ABI = require("./ABI/ABI.json");
+const POOL_ABI = require("./ABI/PoolABI.json");
 import { FACTORY_ABI, FACTORY_ADDRESS } from "./constants.js";
 
 const RPC_URL = "https://api.skyhighblockchain.com";
