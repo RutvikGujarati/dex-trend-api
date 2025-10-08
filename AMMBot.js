@@ -28,8 +28,8 @@ const TOKENS = {
 
 const CONFIG = {
     [`${TOKENS.USDC}-${TOKENS.USDT}`]: { min: 0.999, max: 1.0007 },
-    [`${TOKENS.ETH}-${TOKENS.USDC}`]: { min: 10, max: 11 },
-    [`${TOKENS.ETH}-${TOKENS.USDT}`]: { min: 9, max: 11 }
+    [`${TOKENS.ETH}-${TOKENS.USDC}`]: { min: 9, max: 12 },
+    [`${TOKENS.ETH}-${TOKENS.USDT}`]: { min: 9, max: 12 }
 };
 
 const FEE = 500;
@@ -58,36 +58,49 @@ async function getPoolData(tA, tB) {
     if (addr === ethers.ZeroAddress) return null;
 
     const pool = new ethers.Contract(addr, POOL_ABI, provider);
-    const [t0, t1, slot0] = await Promise.all([
-        pool.token0(), pool.token1(), pool.slot0()
+    const [t0, t1, slot0, liquidityBN] = await Promise.all([
+        pool.token0(), pool.token1(), pool.slot0(), pool.liquidity()
     ]);
 
-    const sqrtPrice = Number(slot0[0].toString());
-    const price = (sqrtPrice / 2 ** 96) ** 2;
+    const sqrtPriceX96 = BigInt(slot0[0].toString());
+    const sqrtPrice = Number(sqrtPriceX96) / 2 ** 96;
+    const price = sqrtPrice ** 2;
+    const liquidity = Number(liquidityBN);
 
-    return {
-        token0: t0,
-        token1: t1,
-        price: price
-    };
+    return { token0: t0, token1: t1, price, sqrtPrice, liquidity };
 }
+function getSwapAmount(pd, tA, targetPrice) {
+    const poolToken0 = pd.token0.toLowerCase();
+    const tA_l = tA.toLowerCase();
+    const targetPricePool = poolToken0 === tA_l ? targetPrice : 1 / targetPrice;
 
-function calculateSwapAmount(currentPrice, targetPrice, reserveA, reserveB, swapAtoB) {
-    if (swapAtoB) {
-        const sqrtRatio = Math.sqrt(currentPrice / targetPrice);
-        return reserveA * (sqrtRatio - 1) / sqrtRatio;
-    } else {
-        const sqrtRatio = Math.sqrt(targetPrice / currentPrice);
-        return reserveB * (sqrtRatio - 1) / sqrtRatio;
-    }
+    const s = pd.sqrtPrice;
+    const sTarget = Math.sqrt(targetPricePool);
+    const L = pd.liquidity;
+
+    if (!isFinite(s) || !isFinite(sTarget) || !isFinite(L) || L <= 0) return null;
+    if (Math.abs(s - sTarget) < 1e-18) return null;
+
+    const needToken1 = sTarget > s;
+    const tokenIn = needToken1 ? pd.token1 : pd.token0;
+    const tokenOut = needToken1 ? pd.token0 : pd.token1;
+
+    let amount = needToken1 ? L * (sTarget - s) : L * (1 / sTarget - 1 / s);
+    if (amount <= 0) return null;
+
+    const scaleFactor = 1e-18;
+    const scaled = amount * scaleFactor;
+
+    const amountInEth = Number(
+        ethers.formatUnits(ethers.parseUnits(scaled.toFixed(18), 18), 18)
+    );
+
+    return { tokenIn, tokenOut, amount: amountInEth };
 }
 
 async function swap(tIn, tOut, amt, dec) {
-    console.log(`  → Swapping ${amt.toFixed(6)} tokens...`);
-
     const amountIn = ethers.parseUnits(amt.toFixed(dec), dec);
     const balance = await getBalance(tIn);
-
     if (balance < amountIn) {
         console.log(`  ⚠ Insufficient balance`);
         return false;
@@ -124,12 +137,6 @@ async function rebalance(tA, tB) {
     const [infoA, infoB] = await Promise.all([getTokenInfo(tA), getTokenInfo(tB)]);
     console.log(`📊 ${infoA.symbol}/${infoB.symbol}`);
 
-    const [balA, balB] = await Promise.all([getBalance(tA), getBalance(tB)]);
-    const balANum = Number(ethers.formatUnits(balA, infoA.decimals));
-    const balBNum = Number(ethers.formatUnits(balB, infoB.decimals));
-
-    console.log(`  Wallet: ${balANum.toFixed(6)} ${infoA.symbol} | ${balBNum.toFixed(6)} ${infoB.symbol}`);
-
     const pd = await getPoolData(tA, tB);
     if (!pd) {
         console.log(`⚠ No pool found`);
@@ -137,7 +144,6 @@ async function rebalance(tA, tB) {
     }
 
     const poolPrice = pd.token0.toLowerCase() === tA.toLowerCase() ? pd.price : 1 / pd.price;
-
     console.log(`  Pool price: ${poolPrice.toFixed(6)} | Range: [${cfg.min}, ${cfg.max}]`);
 
     if (poolPrice >= cfg.min && poolPrice <= cfg.max) {
@@ -145,41 +151,28 @@ async function rebalance(tA, tB) {
         return;
     }
 
-    let targetPrice, swapAmount, tokenIn, tokenOut, decimalsIn;
+    const targetPrice = poolPrice < cfg.min ? cfg.min : cfg.max;
+    const side = poolPrice < cfg.min ? "Below" : "Above";
+    console.log(`📈 ${side} range → rebalancing...`);
 
-    if (poolPrice < cfg.min) {
-        targetPrice = cfg.min;
-        console.log(`📉 Below min → Swap ${infoB.symbol} → ${infoA.symbol}`);
-        swapAmount = calculateSwapAmount(poolPrice, targetPrice, balANum, balBNum, false);
-        tokenIn = tB;
-        tokenOut = tA;
-        decimalsIn = infoB.decimals;
-
-        if (swapAmount <= 0 || swapAmount > balBNum) {
-            console.log(`  ⚠ Invalid amount: ${swapAmount.toFixed(6)}`);
-            return;
-        }
-    } else {
-        targetPrice = cfg.max;
-        console.log(`📈 Above max → Swap ${infoA.symbol} → ${infoB.symbol}`);
-        swapAmount = calculateSwapAmount(poolPrice, targetPrice, balANum, balBNum, true);
-        tokenIn = tA;
-        tokenOut = tB;
-        decimalsIn = infoA.decimals;
-
-        if (swapAmount <= 0 || swapAmount > balANum) {
-            console.log(`  ⚠ Invalid amount: ${swapAmount.toFixed(6)}`);
-            return;
-        }
+    const swapData = getSwapAmount(pd, tA, targetPrice);
+    if (!swapData) {
+        console.log(`⚠ Failed to calculate swap amount`);
+        return;
     }
 
-    const success = await swap(tokenIn, tokenOut, swapAmount, decimalsIn);
+    const infoIn = swapData.tokenIn.toLowerCase() === tA.toLowerCase() ? infoA : infoB;
+    const amt = swapData.amount;
 
-    if (success) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        const [newBalA, newBalB] = await Promise.all([getBalance(tA), getBalance(tB)]);
-        console.log(`  New: ${ethers.formatUnits(newBalA, infoA.decimals)} ${infoA.symbol} | ${ethers.formatUnits(newBalB, infoB.decimals)} ${infoB.symbol}`);
+    if (amt <= 0) {
+        console.log(`⚠ Invalid swap amount`);
+        return;
     }
+
+    console.log(`  → Swapping ${amt.toFixed(infoIn.decimals)} ${infoIn.symbol}`);
+    const success = await swap(swapData.tokenIn, swapData.tokenOut, amt, infoIn.decimals);
+
+    if (success) console.log(`  ✓ Rebalanced toward ${targetPrice}`);
 }
 
 async function main() {
