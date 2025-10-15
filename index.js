@@ -2,6 +2,7 @@ import express from "express";
 import { ethers } from "ethers";
 import { createRequire } from "module";
 import dotenv from "dotenv";
+import axios from "axios";
 import cors from "cors";
 dotenv.config();
 
@@ -114,16 +115,38 @@ const TOKENS = {
     USDT: "0xC26efb6DB570DEE4BD0541A1ed52B590F05E3E3B",
     ETH: "0xc671a7a0Bcef13018B384F5af9f4696Aba5Ff0F1"
 };
-const RANGE_PERCENT = 0.01; // ±1%
+const RANGE_PERCENT = 0.01; // ±1
 
-async function getDynamicRange(tokenA, tokenB) {
-    // Fetch market prices for both tokens from CoinGecko or other API
-    // Example for simplicity: ETH = 3000, USDC = 1, USDT = 1
-    const marketPrices = {
-        ETH: 3000,
-        USDC: 1,
-        USDT: 1
-    };
+// Mapping from token symbols to CoinGecko ids
+const COINGECKO_IDS = {
+    ETH: "ethereum",
+    USDC: "usd-coin",
+    USDT: "tether"
+};
+
+async function fetchMarketPrices() {
+    try {
+        const ids = Object.values(COINGECKO_IDS).join(",");
+        const res = await axios.get(
+            `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`
+        );
+
+        // Map back to token symbols
+        const prices = {};
+        for (const [symbol, id] of Object.entries(COINGECKO_IDS)) {
+            prices[symbol] = res.data[id]?.usd || 1;
+        }
+
+        return prices;
+    } catch (err) {
+        console.error("⚠ Failed to fetch prices from CoinGecko:", err.message);
+        // fallback prices
+        return { ETH: 3000, USDC: 1, USDT: 1 };
+    }
+}
+
+export async function getDynamicRange(tokenA, tokenB) {
+    const marketPrices = await fetchMarketPrices();
 
     const priceA = marketPrices[tokenA.toUpperCase()] || 1;
     const priceB = marketPrices[tokenB.toUpperCase()] || 1;
@@ -132,11 +155,10 @@ async function getDynamicRange(tokenA, tokenB) {
 
     return {
         min: targetPrice * (1 - RANGE_PERCENT),
-        max: targetPrice * (1 + RANGE_PERCENT)
+        max: targetPrice * (1 + RANGE_PERCENT),
+        targetPrice
     };
 }
-
-
 const BOT_STATE = {
     lastRun: null,
     nextRun: null,
