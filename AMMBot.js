@@ -1,5 +1,6 @@
 import { ethers } from "ethers";
 import dotenv from "dotenv";
+import axios from "axios";
 import { createRequire } from "module";
 
 dotenv.config();
@@ -21,30 +22,27 @@ const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
 const swapRouter = new ethers.Contract(SWAP_ROUTER_ADDRESS, SWAP_ROUTER_ABI, wallet);
 
 const TOKENS = {
-    USDC: "0x2A4c1D209ef13dBB846c7E7421a0B8238D155fFB",
-    USDT: "0x188D71EE19cB9976213BBa3867ED5EdAA04e6E78",
-    ETH: "0xEc8f91aDD963aF50f9390795DcD2828990308FA5"
+    USDC: "0x553fE3CA2A5F304857A7c2C78b37686716B8c89b",
+    USDT: "0xC26efb6DB570DEE4BD0541A1ed52B590F05E3E3B",
+    ETH: "0xc671a7a0Bcef13018B384F5af9f4696Aba5Ff0F1"
 };
 
-const CONFIG = {
-    [`${TOKENS.USDC}-${TOKENS.USDT}`]: { min: 0.999, max: 1.0007 },
-    [`${TOKENS.ETH}-${TOKENS.USDC}`]: { min: 9, max: 12 },
-    [`${TOKENS.ETH}-${TOKENS.USDT}`]: { min: 9, max: 12 }
-};
+const FEE = 500; // 0.05%
 
-const FEE = 500;
+// =============== UTIL FUNCTIONS ===============
 
 async function approve(token, spender, amount = ethers.MaxUint256) {
     const c = new ethers.Contract(token, ERC20_ABI, wallet);
     const allowed = await c.allowance(wallet.address, spender);
     if (allowed < amount) {
-        console.log(`  ✓ Approving...`);
+        console.log(`  ✓ Approving ${token.slice(0, 8)}...`);
         await (await c.approve(spender, amount)).wait();
     }
 }
 
 async function getBalance(token) {
-    return new ethers.Contract(token, ERC20_ABI, provider).balanceOf(wallet.address);
+    const c = new ethers.Contract(token, ERC20_ABI, provider);
+    return c.balanceOf(wallet.address);
 }
 
 async function getTokenInfo(token) {
@@ -56,19 +54,40 @@ async function getTokenInfo(token) {
 async function getPoolData(tA, tB) {
     const addr = await factory.getPool(tA, tB, FEE);
     if (addr === ethers.ZeroAddress) return null;
-
     const pool = new ethers.Contract(addr, POOL_ABI, provider);
     const [t0, t1, slot0, liquidityBN] = await Promise.all([
-        pool.token0(), pool.token1(), pool.slot0(), pool.liquidity()
+        pool.token0(),
+        pool.token1(),
+        pool.slot0(),
+        pool.liquidity()
     ]);
-
     const sqrtPriceX96 = BigInt(slot0[0].toString());
     const sqrtPrice = Number(sqrtPriceX96) / 2 ** 96;
     const price = sqrtPrice ** 2;
-    const liquidity = Number(liquidityBN);
-
-    return { token0: t0, token1: t1, price, sqrtPrice, liquidity };
+    return { token0: t0, token1: t1, price, sqrtPrice, liquidity: Number(liquidityBN) };
 }
+
+// =============== MARKET PRICE FETCHER ===============
+
+async function getMarketPrices() {
+    try {
+        const res = await axios.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=ethereum,tether,usd-coin&vs_currencies=usd"
+        );
+        const data = res.data;
+        return {
+            ETH: data.ethereum.usd,
+            USDT: data.tether.usd,
+            USDC: data["usd-coin"].usd
+        };
+    } catch (err) {
+        console.error("⚠ Failed to fetch prices", err.message);
+        return null;
+    }
+}
+
+// =============== PRICE CALCULATION LOGIC ===============
+
 function getSwapAmount(pd, tA, targetPrice) {
     const poolToken0 = pd.token0.toLowerCase();
     const tA_l = tA.toLowerCase();
@@ -77,9 +96,7 @@ function getSwapAmount(pd, tA, targetPrice) {
     const s = pd.sqrtPrice;
     const sTarget = Math.sqrt(targetPricePool);
     const L = pd.liquidity;
-
     if (!isFinite(s) || !isFinite(sTarget) || !isFinite(L) || L <= 0) return null;
-    if (Math.abs(s - sTarget) < 1e-18) return null;
 
     const needToken1 = sTarget > s;
     const tokenIn = needToken1 ? pd.token1 : pd.token0;
@@ -89,53 +106,47 @@ function getSwapAmount(pd, tA, targetPrice) {
     if (amount <= 0) return null;
 
     const scaleFactor = 1e-18;
-    const scaled = amount * scaleFactor;
-
-    const amountInEth = Number(
-        ethers.formatUnits(ethers.parseUnits(scaled.toFixed(18), 18), 18)
-    );
-
-    return { tokenIn, tokenOut, amount: amountInEth };
+    return { tokenIn, tokenOut, amount: amount * scaleFactor };
 }
+
+// =============== SWAP ===============
 
 async function swap(tIn, tOut, amt, dec) {
     const amountIn = ethers.parseUnits(amt.toFixed(dec), dec);
     const balance = await getBalance(tIn);
     if (balance < amountIn) {
-        console.log(`  ⚠ Insufficient balance`);
+        console.log(`  ⚠ Not enough balance for ${tIn.slice(0, 8)}`);
         return false;
     }
-
     await approve(tIn, SWAP_ROUTER_ADDRESS, amountIn);
 
     const params = [
-        tIn, tOut, FEE, wallet.address,
+        tIn,
+        tOut,
+        FEE,
+        wallet.address,
         Math.floor(Date.now() / 1000) + 600,
-        amountIn, 0, 0
+        amountIn,
+        0,
+        0
     ];
 
     try {
         const tx = await swapRouter.exactInputSingle(params, { gasLimit: 500_000 });
-        const receipt = await tx.wait();
-        console.log(`  ✓ Swap done: ${receipt.hash.slice(0, 10)}...`);
+        await tx.wait();
+        console.log(`  ✓ Swap successful`);
         return true;
-    } catch (error) {
-        console.error(`  ✗ Swap failed: ${error.message}`);
+    } catch (err) {
+        console.error(`  ✗ Swap failed: ${err.message}`);
         return false;
     }
 }
 
-async function rebalance(tA, tB) {
-    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-    const key = `${tA}-${tB}`;
-    const cfg = CONFIG[key];
-    if (!cfg) {
-        console.log(`⚠ No config for pair`);
-        return;
-    }
+// =============== REBALANCING LOGIC ===============
 
+async function rebalance(tA, tB, marketPrice) {
     const [infoA, infoB] = await Promise.all([getTokenInfo(tA), getTokenInfo(tB)]);
-    console.log(`📊 ${infoA.symbol}/${infoB.symbol}`);
+    console.log(`\n📊 Checking ${infoA.symbol}/${infoB.symbol}`);
 
     const pd = await getPoolData(tA, tB);
     if (!pd) {
@@ -144,49 +155,70 @@ async function rebalance(tA, tB) {
     }
 
     const poolPrice = pd.token0.toLowerCase() === tA.toLowerCase() ? pd.price : 1 / pd.price;
-    console.log(`  Pool price: ${poolPrice.toFixed(6)} | Range: [${cfg.min}, ${cfg.max}]`);
+    const targetPrice = marketPrice[infoA.symbol] / marketPrice[infoB.symbol];
+    const lower = targetPrice * 0.99;
+    const upper = targetPrice * 1.01;
 
-    if (poolPrice >= cfg.min && poolPrice <= cfg.max) {
-        console.log(`✓ In range`);
+    console.log(
+        `  Pool: ${poolPrice.toFixed(6)} | Market: ${targetPrice.toFixed(6)} | Range: [${lower.toFixed(
+            6
+        )}, ${upper.toFixed(6)}]`
+    );
+
+    if (poolPrice >= lower && poolPrice <= upper) {
+        console.log(`  ✓ In range`);
         return;
     }
-
-    const targetPrice = poolPrice < cfg.min ? cfg.min : cfg.max;
-    const side = poolPrice < cfg.min ? "Below" : "Above";
-    console.log(`📈 ${side} range → rebalancing...`);
 
     const swapData = getSwapAmount(pd, tA, targetPrice);
     if (!swapData) {
-        console.log(`⚠ Failed to calculate swap amount`);
+        console.log(`⚠ Cannot compute swap`);
         return;
     }
 
-    const infoIn = swapData.tokenIn.toLowerCase() === tA.toLowerCase() ? infoA : infoB;
+    const infoIn =
+        swapData.tokenIn.toLowerCase() === tA.toLowerCase() ? infoA : infoB;
     const amt = swapData.amount;
 
     if (amt <= 0) {
-        console.log(`⚠ Invalid swap amount`);
+        console.log(`⚠ Invalid amount`);
         return;
     }
 
-    console.log(`  → Swapping ${amt.toFixed(infoIn.decimals)} ${infoIn.symbol}`);
+    console.log(`  → Swapping ${amt.toFixed(6)} ${infoIn.symbol} to rebalance`);
     const success = await swap(swapData.tokenIn, swapData.tokenOut, amt, infoIn.decimals);
 
-    if (success) console.log(`  ✓ Rebalanced toward ${targetPrice}`);
+    if (!success) return;
+
+    // ✅ Fetch pool data again to confirm change
+    const pdAfter = await getPoolData(tA, tB);
+    const newPoolPrice =
+        pdAfter.token0.toLowerCase() === tA.toLowerCase() ? pdAfter.price : 1 / pdAfter.price;
+
+    const moved = Math.abs(newPoolPrice - targetPrice) < Math.abs(poolPrice - targetPrice);
+    console.log(`  📉 Old pool: ${poolPrice.toFixed(6)}`);
+    console.log(`  📈 New pool: ${newPoolPrice.toFixed(6)}`);
+    console.log(
+        moved
+            ? `  ✅ Price moved closer to target (${targetPrice.toFixed(6)})`
+            : `  ⚠ Price did not move toward target`
+    );
 }
 
+
+// =============== MAIN LOOP ===============
+
 async function main() {
-    console.log(`\n${"=".repeat(50)}`);
+    console.log(`\n${"=".repeat(60)}`);
     console.log(`⏰ ${new Date().toLocaleTimeString()}`);
-    console.log("=".repeat(50));
-    try {
-        await rebalance(TOKENS.USDC, TOKENS.USDT);
-        await rebalance(TOKENS.ETH, TOKENS.USDC);
-        await rebalance(TOKENS.ETH, TOKENS.USDT);
-        console.log(`\n✅ Done`);
-    } catch (e) {
-        console.error(`\n❌ Error: ${e.message}`);
-    }
+    console.log(`${"=".repeat(60)}`);
+
+    const market = await getMarketPrices();
+    if (!market) return;
+
+    await rebalance(TOKENS.ETH, TOKENS.USDC, market);
+    await rebalance(TOKENS.ETH, TOKENS.USDT, market);
+    await rebalance(TOKENS.USDT, TOKENS.USDC, market);
 }
 
 main();

@@ -205,10 +205,6 @@ async function rebalance(tA, tB) {
     const inRange = poolPrice >= cfg.min && poolPrice <= cfg.max;
     const side = poolPrice < cfg.min ? "Below" : poolPrice > cfg.max ? "Above" : "In Range";
 
-    // Approximate LP value in ETH
-    // We’ll assume:
-    // - If ETH is one of the tokens, that’s your reference
-    // - If not, we use the USDC/USDT pair assuming 1 USD ≈ 1 / 3000 ETH (you can update this to pull live price)
     let token0ValueETH = 0;
     let token1ValueETH = 0;
 
