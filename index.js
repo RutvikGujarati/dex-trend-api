@@ -114,12 +114,28 @@ const TOKENS = {
     USDT: "0xC26efb6DB570DEE4BD0541A1ed52B590F05E3E3B",
     ETH: "0xc671a7a0Bcef13018B384F5af9f4696Aba5Ff0F1"
 };
+const RANGE_PERCENT = 0.01; // ±1%
 
-const CONFIG = {
-    [`${TOKENS.USDC}-${TOKENS.USDT}`]: { min: 0.999, max: 1.0007 },
-    [`${TOKENS.ETH}-${TOKENS.USDC}`]: { min: 9, max: 12 },
-    [`${TOKENS.ETH}-${TOKENS.USDT}`]: { min: 9, max: 12 }
-};
+async function getDynamicRange(tokenA, tokenB) {
+    // Fetch market prices for both tokens from CoinGecko or other API
+    // Example for simplicity: ETH = 3000, USDC = 1, USDT = 1
+    const marketPrices = {
+        ETH: 3000,
+        USDC: 1,
+        USDT: 1
+    };
+
+    const priceA = marketPrices[tokenA.toUpperCase()] || 1;
+    const priceB = marketPrices[tokenB.toUpperCase()] || 1;
+
+    const targetPrice = priceA / priceB;
+
+    return {
+        min: targetPrice * (1 - RANGE_PERCENT),
+        max: targetPrice * (1 + RANGE_PERCENT)
+    };
+}
+
 
 const BOT_STATE = {
     lastRun: null,
@@ -189,8 +205,7 @@ async function getPoolData(tA, tB) {
     };
 }
 async function rebalance(tA, tB) {
-    const key = `${tA}-${tB}`;
-    const cfg = CONFIG[key];
+    const cfg = await getDynamicRange(tA, tB);
     if (!cfg) return { error: "No config for pair" };
 
     const [infoA, infoB, pd] = await Promise.all([
