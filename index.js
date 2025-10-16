@@ -1,11 +1,14 @@
+// ==========================
+// Unified AMM + Order Monitor Backend
+// ==========================
 import express from "express";
 import { ethers } from "ethers";
 import { createRequire } from "module";
 import dotenv from "dotenv";
 import axios from "axios";
 import cors from "cors";
-dotenv.config();
 
+dotenv.config();
 const require = createRequire(import.meta.url);
 
 // =============== Original Imports ===============
@@ -24,7 +27,9 @@ const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const EXECUTOR_ADDRESS = "0x10e9c43B9Fbf78ca0d83515AE36D360110e4331d";
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, ABI.abi, wallet);
 
-// =============== Existing Monitor Logic ===============
+// ===================================================
+// 🔁 Order Monitoring Logic
+// ===================================================
 async function getCurrentRatio(tokenA, tokenB) {
     const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
     const poolAddress = await factory.getPool(tokenA, tokenB, FIXED_FEE);
@@ -87,7 +92,9 @@ async function monitorOrders(intervalMs = 10000) {
 
 monitorOrders();
 
-// =============== Express Server ===============
+// ===================================================
+// 🌐 Express Server Setup
+// ===================================================
 const app = express();
 app.use(cors({ origin: "*" }));
 const PORT = process.env.PORT || 4000;
@@ -106,7 +113,7 @@ app.get("/order/:id", async (req, res) => {
 });
 
 // ===================================================
-// 🧠 AMM BOT SECTION (Directly Embedded)
+// 🧠 AMM BOT SECTION
 // ===================================================
 const ERC20_ABI = require("./ABI/IERC20.json").abi;
 
@@ -115,42 +122,65 @@ const TOKENS = {
     USDT: "0xC26efb6DB570DEE4BD0541A1ed52B590F05E3E3B",
     ETH: "0xc671a7a0Bcef13018B384F5af9f4696Aba5Ff0F1"
 };
-const RANGE_PERCENT = 0.01; // ±1
+const RANGE_PERCENT = 0.01; // ±1%
 
-// Mapping from token symbols to CoinGecko ids
+// CoinGecko token IDs
 const COINGECKO_IDS = {
     ETH: "ethereum",
     USDC: "usd-coin",
     USDT: "tether"
 };
 
+// -------------------- Fetch Market Prices --------------------
+let cachedPrices = null;
+let lastPriceFetch = 0;
+
 async function fetchMarketPrices() {
+    const now = Date.now();
+    if (cachedPrices && now - lastPriceFetch < 60_000) {
+        return cachedPrices; // use cached data
+    }
+
     try {
         const ids = Object.values(COINGECKO_IDS).join(",");
         const res = await axios.get(
             `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`
         );
 
-        // Map back to token symbols
         const prices = {};
         for (const [symbol, id] of Object.entries(COINGECKO_IDS)) {
             prices[symbol] = res.data[id]?.usd || 1;
         }
 
+        cachedPrices = prices;
+        lastPriceFetch = now;
+        console.log("📊 Market Prices (updated):", prices);
         return prices;
     } catch (err) {
         console.error("⚠ Failed to fetch prices from CoinGecko:", err.message);
-        // fallback prices
+
+        // Fallback: return last cached or static defaults
+        if (cachedPrices) {
+            console.warn("⚙ Using cached prices due to rate limit.");
+            return cachedPrices;
+        }
         return { ETH: 3000, USDC: 1, USDT: 1 };
     }
 }
 
+async function getCachedMarketPrices() {
+    const now = Date.now();
+    if (!cachedPrices || now - lastPriceFetch > 60_000) { // 1 min cache
+        cachedPrices = await fetchMarketPrices();
+        lastPriceFetch = now;
+    }
+    return cachedPrices;
+}
+// -------------------- Dynamic Range --------------------
 export async function getDynamicRange(tokenA, tokenB) {
-    const marketPrices = await fetchMarketPrices();
-
+    const marketPrices = await getCachedMarketPrices();
     const priceA = marketPrices[tokenA.toUpperCase()] || 1;
     const priceB = marketPrices[tokenB.toUpperCase()] || 1;
-
     const targetPrice = priceA / priceB;
 
     return {
@@ -159,6 +189,7 @@ export async function getDynamicRange(tokenA, tokenB) {
         targetPrice
     };
 }
+
 const BOT_STATE = {
     lastRun: null,
     nextRun: null,
@@ -172,6 +203,7 @@ async function getTokenInfo(token) {
     const [decimals, symbol] = await Promise.all([c.decimals(), c.symbol()]);
     return { decimals: Number(decimals), symbol };
 }
+
 async function getPoolData(tA, tB) {
     const addr = await factory.getPool(tA, tB, 500);
     if (addr === ethers.ZeroAddress) return null;
@@ -187,24 +219,20 @@ async function getPoolData(tA, tB) {
         pool.tickSpacing()
     ]);
 
-    // Safe conversion for sqrtPriceX96
     const sqrtPriceX96 = BigInt(slot0[0].toString());
     const sqrtPrice = Number(sqrtPriceX96) / Number(2n ** 96n);
-    const price = sqrtPrice ** 2; // token1 per token0
+    const price = sqrtPrice ** 2;
     const tick = Number(slot0[1]);
     const liquidity = Number(liquidityBN);
 
-    // Token decimals
     const [dec0, dec1] = await Promise.all([
         new ethers.Contract(t0, ERC20_ABI, provider).decimals(),
         new ethers.Contract(t1, ERC20_ABI, provider).decimals()
     ]);
 
-    // ⚠ Approximation — Uniswap v3 concentrated liquidity doesn’t map directly to reserves
     const reserve0 = liquidity / sqrtPrice;
     const reserve1 = liquidity * sqrtPrice;
 
-    // Scale to token units
     const token0Reserve = reserve0 / 10 ** Number(dec0);
     const token1Reserve = reserve1 / 10 ** Number(dec1);
 
@@ -226,7 +254,11 @@ async function getPoolData(tA, tB) {
         }
     };
 }
-async function rebalance(tA, tB) {
+
+// -------------------- Rebalance Core --------------------
+async function rebalance(tA, tB, marketPrice) {
+    if (!marketPrice) return { error: "Market price data missing" };
+
     const cfg = await getDynamicRange(tA, tB);
     if (!cfg) return { error: "No config for pair" };
 
@@ -238,20 +270,26 @@ async function rebalance(tA, tB) {
 
     if (!pd) return { error: "Pool not found" };
 
+    if (!marketPrice[infoA.symbol] || !marketPrice[infoB.symbol]) {
+        return { error: `Missing price for ${infoA.symbol}/${infoB.symbol}` };
+    }
+
+    const targetPrice = marketPrice[infoA.symbol] / marketPrice[infoB.symbol];
+    const lower = targetPrice * 0.99;
+    const upper = targetPrice * 1.01;
     const poolPrice = pd.token0.toLowerCase() === tA.toLowerCase() ? pd.price : 1 / pd.price;
     const inRange = poolPrice >= cfg.min && poolPrice <= cfg.max;
     const side = poolPrice < cfg.min ? "Below" : poolPrice > cfg.max ? "Above" : "In Range";
 
-    let token0ValueETH = 0;
-    let token1ValueETH = 0;
-
+    const reserve0 = pd.reserves.token0Reserve;
+    const reserve1 = pd.reserves.token1Reserve;
     const ETH_ADDRESSES = [
         TOKENS.ETH.toLowerCase(),
         "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
     ];
 
-    const reserve0 = pd.reserves.token0Reserve;
-    const reserve1 = pd.reserves.token1Reserve;
+    let token0ValueETH = 0;
+    let token1ValueETH = 0;
 
     if (ETH_ADDRESSES.includes(tA.toLowerCase())) {
         token0ValueETH = reserve0;
@@ -260,8 +298,7 @@ async function rebalance(tA, tB) {
         token1ValueETH = reserve1;
         token0ValueETH = reserve0 * poolPrice;
     } else {
-        // If both are stable or non-ETH assets, approximate at ETH ≈ 3000 USD
-        const ETH_PRICE = 3000;
+        const ETH_PRICE = marketPrice.ETH || 3000;
         token0ValueETH = reserve0 / ETH_PRICE;
         token1ValueETH = reserve1 / ETH_PRICE;
     }
@@ -272,7 +309,7 @@ async function rebalance(tA, tB) {
         pair: `${infoA.symbol}/${infoB.symbol}`,
         poolAddress: pd.addr,
         price: poolPrice.toFixed(6),
-        range: `[${cfg.min}, ${cfg.max}]`,
+        range: `[${lower.toFixed(6)}, ${upper.toFixed(6)}]`,
         tick: pd.tick,
         fee: pd.fee,
         liquidity: pd.liquidity.toFixed(2),
@@ -285,13 +322,13 @@ async function rebalance(tA, tB) {
     };
 }
 
-// AMM endpoints
+// -------------------- AMM API Endpoints --------------------
 app.get("/amm/status", async (req, res) => {
     try {
         const pairs = await Promise.all([
-            rebalance(TOKENS.USDC, TOKENS.USDT),
-            rebalance(TOKENS.ETH, TOKENS.USDC),
-            rebalance(TOKENS.ETH, TOKENS.USDT)
+            rebalance(TOKENS.USDC, TOKENS.USDT, await getCachedMarketPrices()),
+            rebalance(TOKENS.ETH, TOKENS.USDC, await getCachedMarketPrices()),
+            rebalance(TOKENS.ETH, TOKENS.USDT, await getCachedMarketPrices())
         ]);
 
         BOT_STATE.lastRun = new Date().toLocaleString();
@@ -309,7 +346,8 @@ app.get("/amm/rebalance/:pair", async (req, res) => {
         const [tA, tB] = req.params.pair.split("-");
         if (!tA || !tB) return res.status(400).json({ error: "Invalid pair format" });
 
-        const result = await rebalance(tA, tB);
+        const market = await getCachedMarketPrices(); 
+        const result = await rebalance(tA, tB, market);
         res.json(result);
     } catch (err) {
         res.status(500).json({ error: err.message });
