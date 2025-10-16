@@ -102,12 +102,19 @@ function getSwapAmount(pd, tA, targetPrice) {
     const tokenIn = needToken1 ? pd.token1 : pd.token0;
     const tokenOut = needToken1 ? pd.token0 : pd.token1;
 
+    // Full theoretical amount
     let amount = needToken1 ? L * (sTarget - s) : L * (1 / sTarget - 1 / s);
     if (amount <= 0) return null;
 
     const scaleFactor = 1e-18;
+
+    // ✅ Apply a gradual step (e.g., 20% of full amount)
+    const STEP = 0.01; // 20% of full swap
+    amount = amount * STEP;
+
     return { tokenIn, tokenOut, amount: amount * scaleFactor };
 }
+
 
 // =============== SWAP ===============
 
@@ -143,6 +150,20 @@ async function swap(tIn, tOut, amt, dec) {
 }
 
 // =============== REBALANCING LOGIC ===============
+function estimateOutput(amountIn, pd, tokenIn, tokenOut) {
+    // Approximation for small swaps using price
+    const poolPrice = pd.token0.toLowerCase() === tokenIn.toLowerCase()
+        ? pd.price
+        : 1 / pd.price;
+
+    if (tokenIn.toLowerCase() === pd.token0.toLowerCase()) {
+        // token0 -> token1
+        return amountIn * poolPrice;
+    } else {
+        // token1 -> token0
+        return amountIn / poolPrice;
+    }
+}
 
 async function rebalance(tA, tB, marketPrice) {
     const [infoA, infoB] = await Promise.all([getTokenInfo(tA), getTokenInfo(tB)]);
@@ -184,8 +205,13 @@ async function rebalance(tA, tB, marketPrice) {
         console.log(`⚠ Invalid amount`);
         return;
     }
+    const tokenOut = swapData.tokenOut;
+    const estimatedOut = estimateOutput(amt, pd, swapData.tokenIn, tokenOut);
 
-    console.log(`  → Swapping ${amt.toFixed(6)} ${infoIn.symbol} to rebalance`);
+    console.log(
+        `  → Swapping ${amt.toFixed(6)} ${swapData.tokenIn === tA ? infoA.symbol : infoB.symbol} ` +
+        `→ ${tokenOut} (≈ ${estimatedOut.toFixed(6)} ${tokenOut === tA ? infoA.symbol : infoB.symbol})`
+    );
     const success = await swap(swapData.tokenIn, swapData.tokenOut, amt, infoIn.decimals);
 
     if (!success) return;
