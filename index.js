@@ -24,7 +24,7 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 // =============== Executor Contract ===============
-const EXECUTOR_ADDRESS = "0x3699E98140EFf7D62f8Df3AB588245C55246dF48";
+const EXECUTOR_ADDRESS = "0x230eb7155cD2392b8113fE5B557f9F05A81Df9Cd";
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, ABI.abi, wallet);
 
 // ===================================================
