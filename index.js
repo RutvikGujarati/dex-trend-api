@@ -63,9 +63,16 @@ async function monitorOrders(intervalMs = 10000) {
                     const currentRatio = await getCurrentRatio(order.tokenIn, order.tokenOut);
                     const targetRatio = Number(ethers.formatUnits(order.targetSqrtPriceX96, 18));
 
-                    const conditionMet = order.triggerAbove
-                        ? currentRatio >= targetRatio
-                        : currentRatio <= targetRatio;
+                    const isBuy = !order.triggerAbove; // usually BUY = triggerBelow, SELL = triggerAbove
+
+                    let conditionMet = false;
+                    if (isBuy) {
+                        // BUY: execute when price drops down to or below target
+                        conditionMet = currentRatio <= targetRatio;
+                    } else {
+                        // SELL: execute when price rises up to or above target
+                        conditionMet = currentRatio >= targetRatio;
+                    }
 
                     console.log(
                         `Order ${orderId} | Current: ${currentRatio.toFixed(6)} | Target: ${targetRatio.toFixed(6)} | Met: ${conditionMet}`
@@ -346,7 +353,7 @@ app.get("/amm/rebalance/:pair", async (req, res) => {
         const [tA, tB] = req.params.pair.split("-");
         if (!tA || !tB) return res.status(400).json({ error: "Invalid pair format" });
 
-        const market = await getCachedMarketPrices(); 
+        const market = await getCachedMarketPrices();
         const result = await rebalance(tA, tB, market);
         res.json(result);
     } catch (err) {
