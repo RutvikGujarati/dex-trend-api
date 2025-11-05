@@ -60,10 +60,15 @@ async function monitorOrders(intervalMs = 10000) {
                     if (order.filled || order.cancelled) continue;
                     if (Number(order.expiry) < Math.floor(Date.now() / 1000)) continue;
 
-                    const currentRatio = await getCurrentRatio(order.tokenIn, order.tokenOut);
+                    const isBuy = !order.triggerAbove; // usually BUY = triggerBelow, SELL = triggerAbove
+                    let currentRatio;
+                    if (isBuy) {
+                        currentRatio = await getCurrentRatio(order.tokenOut, order.tokenIn);
+                    } else {
+                        currentRatio = await getCurrentRatio(order.tokenIn, order.tokenOut);
+                    }
                     const targetRatio = Number(ethers.formatUnits(order.targetSqrtPriceX96, 18));
 
-                    const isBuy = !order.triggerAbove; // usually BUY = triggerBelow, SELL = triggerAbove
 
                     let conditionMet = false;
                     if (isBuy) {
