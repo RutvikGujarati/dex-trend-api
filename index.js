@@ -23,7 +23,7 @@ const FIXED_FEE = 500;
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
-const EXECUTOR_ADDRESS = "0xa8a95b7fD8d317daBc55172316bF76453b970F57";
+const EXECUTOR_ADDRESS = "0xD80712A300F0c8Fb974315b63c0F048a1CFF1339";
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, ABI.abi, wallet);
 
 /* ===================================================
