@@ -1,6 +1,8 @@
-// ==========================
-// Unified AMM + Order Monitor Backend
-// ==========================
+// ===================================================
+// 🔁 Order Monitoring Logic
+// ===================================================
+
+// existing imports
 import express from "express";
 import { ethers } from "ethers";
 import { createRequire } from "module";
@@ -11,25 +13,22 @@ import cors from "cors";
 dotenv.config();
 const require = createRequire(import.meta.url);
 
-// =============== Original Imports ===============
 const ABI = require("./ABI/ABI.json");
 const POOL_ABI = require("./ABI/PoolABI.json");
 import { FACTORY_ABI, FACTORY_ADDRESS } from "./constants.js";
 
-// =============== Shared Provider Setup ===============
 const RPC_URL = "https://api.skyhighblockchain.com";
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const FIXED_FEE = 500;
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
-// =============== Executor Contract ===============
-const EXECUTOR_ADDRESS = "0x230eb7155cD2392b8113fE5B557f9F05A81Df9Cd";
+const EXECUTOR_ADDRESS = "0xa8a95b7fD8d317daBc55172316bF76453b970F57";
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, ABI.abi, wallet);
 
-// ===================================================
-// 🔁 Order Monitoring Logic
-// ===================================================
+/* ===================================================
+   ✅ PRICE CHECK HELPER
+=================================================== */
 async function getCurrentRatio(tokenA, tokenB) {
     const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
     const poolAddress = await factory.getPool(tokenA, tokenB, FIXED_FEE);
@@ -46,6 +45,9 @@ async function getCurrentRatio(tokenA, tokenB) {
     return token0.toLowerCase() === tokenA.toLowerCase() ? price : 1 / price;
 }
 
+/* ===================================================
+   🔎 MONITOR OPEN ORDERS
+=================================================== */
 async function monitorOrders(intervalMs = 10000) {
     console.log("🔎 Order monitor started...");
 
@@ -60,7 +62,7 @@ async function monitorOrders(intervalMs = 10000) {
                     if (order.filled || order.cancelled) continue;
                     if (Number(order.expiry) < Math.floor(Date.now() / 1000)) continue;
 
-                    const isBuy = !order.triggerAbove; // usually BUY = triggerBelow, SELL = triggerAbove
+                    const isBuy = !order.triggerAbove;
                     let currentRatio;
                     if (isBuy) {
                         currentRatio = await getCurrentRatio(order.tokenOut, order.tokenIn);
@@ -69,15 +71,9 @@ async function monitorOrders(intervalMs = 10000) {
                     }
                     const targetRatio = Number(ethers.formatUnits(order.targetSqrtPriceX96, 18));
 
-
                     let conditionMet = false;
-                    if (isBuy) {
-                        // BUY: execute when price drops down to or below target
-                        conditionMet = currentRatio <= targetRatio;
-                    } else {
-                        // SELL: execute when price rises up to or above target
-                        conditionMet = currentRatio >= targetRatio;
-                    }
+                    if (isBuy) conditionMet = currentRatio <= targetRatio;
+                    else conditionMet = currentRatio >= targetRatio;
 
                     console.log(
                         `Order ${orderId} | Current: ${currentRatio.toFixed(6)} | Target: ${targetRatio.toFixed(6)} | Met: ${conditionMet}`
@@ -102,15 +98,53 @@ async function monitorOrders(intervalMs = 10000) {
     }
 }
 
+/* ===================================================
+   🕓 AUTO EXPIRED ORDER CLEANER (runs every 5 min)
+=================================================== */
+async function cleanExpiredOrders(batchSize = 50) {
+    try {
+        const nextId = Number(await executor.nextOrderId());
+        console.log(`🧹 Checking expired orders up to ID ${nextId - 1}`);
+
+        let from = 1;
+        while (from < nextId) {
+            const to = Math.min(from + batchSize - 1, nextId - 1);
+            console.log(`🔄 Refunding expired orders ${from} → ${to} ...`);
+            try {
+                const tx = await executor.distributeExpiredOrders(from, to, { gasLimit: 5_000_000 });
+                console.log(`⛽ Refund Tx sent: ${tx.hash}`);
+                const receipt = await tx.wait();
+                console.log(`✅ Refunded batch ${from}-${to} in block ${receipt.blockNumber}`);
+            } catch (e) {
+                console.log(`⚠️  Refund batch ${from}-${to} skipped: ${e.message}`);
+            }
+            from += batchSize;
+        }
+    } catch (err) {
+        console.error("🚨 Expiry cleanup error:", err.message);
+    }
+}
+
+/* ===================================================
+   ⏰ Run monitor + cleaner
+=================================================== */
+
+// start order monitoring loop
 monitorOrders();
 
-// ===================================================
-// 🌐 Express Server Setup
-// ===================================================
+// run cleaner every 5 minutes
+setInterval(async () => {
+    console.log("⏰ Running expired order cleanup...");
+    await cleanExpiredOrders(50);
+}, 5 * 60 * 1000);
+
+/* ===================================================
+   🌐 EXPRESS SERVER
+=================================================== */
 const app = express();
 app.use(cors({ origin: "*" }));
-const PORT = process.env.PORT || 4000;
 
+const PORT = process.env.PORT || 4000;
 app.get("/", (req, res) => {
     res.json({ status: "ok", executor: EXECUTOR_ADDRESS });
 });
