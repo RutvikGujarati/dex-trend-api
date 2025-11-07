@@ -1,122 +1,38 @@
 // ===================================================
-// 🏦 Order Monitor + Binance-style Internal Matching + Cleaner
-// FIXED: Proper decimal handling and human-readable price display
+// 🏦 Minimal Order Monitor + Matching Bot
+// Uses only contract data (no Uniswap SDK / no pool info)
 // ===================================================
-import express from "express";
 import { ethers } from "ethers";
+import express from "express";
+import cors from "cors";
 import { createRequire } from "module";
 import dotenv from "dotenv";
-import cors from "cors";
-
 dotenv.config();
 const require = createRequire(import.meta.url);
-import { FACTORY_ADDRESS, FACTORY_ABI } from "./constants.js";
 
-// ---- Config ----
+// ---- CONFIG ----
 const RPC_URL = process.env.RPC_URL || "https://api.skyhighblockchain.com";
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const EXECUTOR_ADDRESS = process.env.EXECUTOR_ADDRESS || "0xfc1224250d6f7E8aced166474849f966914D4141";
+const EXECUTOR_ADDRESS = "0x5E468862884448829b1C9A1805ea04a0C9613dA8";
 
-// ABIs
+// ---- ABIs ----
 const EXECUTOR_ABI = require("./ABI/ABI.json");
-const UNISWAP_V3_POOL_ABI = require("./ABI/PoolABI.json");
 
-// ---- RPC / Wallet ----
+// ---- SETUP ----
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
-
-// ---- Executor (your matching contract) ----
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, EXECUTOR_ABI, wallet);
 
-// ---- Constants (BigInt) ----
-const ONE_E18 = 1_000_000_000_000_000_000n; // 1e18
-const TWO_POW_192 = 1n << 192n;
-
-// ---- Caches ----
-const tokenDecimalsCache = new Map();
-const tokenSymbolCache = new Map();
-const poolInfoCache = new Map();
-
 // ===================================================
-// Helpers: ERC20 + Pool meta
+// 🔹 Decode sqrtPriceX96 → Normal Price
 // ===================================================
-async function getTokenDecimals(addr) {
-  const key = addr.toLowerCase();
-  if (tokenDecimalsCache.has(key)) return tokenDecimalsCache.get(key);
-  const c = new ethers.Contract(addr, ERC20_ABI, provider);
-  const d = Number(await c.decimals());
-  tokenDecimalsCache.set(key, d);
-  return d;
-}
-
-async function getTokenSymbol(addr) {
-  const key = addr.toLowerCase();
-  if (tokenSymbolCache.has(key)) return tokenSymbolCache.get(key);
-  const c = new ethers.Contract(addr, ERC20_ABI, provider);
-  let s = "";
-  try { s = await c.symbol(); } catch { s = key.slice(0, 6); }
-  tokenSymbolCache.set(key, s);
-  return s;
-}
-
-async function getPoolInfo(poolAddr) {
-  const key = poolAddr.toLowerCase();
-  if (poolInfoCache.has(key)) return poolInfoCache.get(key);
-  const pool = new ethers.Contract(poolAddr, UNISWAP_V3_POOL_ABI.abi, provider);
-  const [token0, token1, fee] = await Promise.all([pool.token0(), pool.token1(), pool.fee()]);
-  const info = { token0: token0.toLowerCase(), token1: token1.toLowerCase(), fee: Number(fee) };
-  poolInfoCache.set(key, info);
-  return info;
+function decodePriceFromSqrt(sqrtPriceX96) {
+  const sqrt = Number(sqrtPriceX96) / 2 ** 96;
+  return sqrt * sqrt;
 }
 
 // ===================================================
-// 🔧 FIX: Convert raw price ratio to human-readable with decimals
-// ===================================================
-function formatPrice(ratio1e18, decimalsIn, decimalsOut) {
-  // ratio1e18 is the raw price (tokenOut per tokenIn) scaled by 1e18
-  // Adjust for actual token decimals
-  const decimalAdjustment = Math.pow(10, decimalsOut - decimalsIn);
-  const humanPrice = (Number(ratio1e18) / 1e18) * decimalAdjustment;
-  return humanPrice;
-}
-
-// ===================================================
-// 🔧 FIX: Format token amount with proper decimals
-// ===================================================
-function formatAmount(amount, decimals) {
-  return Number(amount) / Math.pow(10, decimals);
-}
-
-// ===================================================
-// Price math (BigInt-safe): tokenIn -> tokenOut using sqrtPriceX96
-// ===================================================
-function ratio1e18FromSqrt(tokenIn, tokenOut, token0, token1, sqrtPriceX96) {
-  const sq = BigInt(sqrtPriceX96);
-  const priceX192 = sq * sq;
-  if (tokenIn.toLowerCase() === token0 && tokenOut.toLowerCase() === token1) {
-    return (priceX192 * ONE_E18) >> 192n;
-  } else if (tokenIn.toLowerCase() === token1 && tokenOut.toLowerCase() === token0) {
-    return (ONE_E18 * TWO_POW_192) / priceX192;
-  } else {
-    throw new Error("ratio1e18FromSqrt: invalid token pair for this pool");
-  }
-}
-
-// ===================================================
-// On-chain price ratio from contract
-// ===================================================
-async function getCurrentPriceFromContract(poolAddr, tokenIn, tokenOut) {
-  try {
-    const ratio1e18 = await executor.getTokenRatio(poolAddr, tokenIn, tokenOut);
-    return Number(ratio1e18) / 1e18;
-  } catch (e) {
-    console.log(`⚠️ getTokenRatio failed for ${poolAddr}: ${e.message}`);
-    return 0;
-  }
-}
-
-// ===================================================
-// Open orders
+// 🔹 Fetch All Open Orders
 // ===================================================
 async function fetchOpenOrders() {
   const nextIdBN = await executor.nextOrderId();
@@ -125,16 +41,17 @@ async function fetchOpenOrders() {
   const tasks = [];
   for (let id = 1; id < nextId; id++) {
     tasks.push(
-      executor.getOrder(id)
+      executor
+        .getOrder(id)
         .then((o) => ({ id, o }))
         .catch(() => null)
     );
   }
 
-  const rows = (await Promise.all(tasks)).filter(Boolean);
+  const results = (await Promise.all(tasks)).filter(Boolean);
   const now = Math.floor(Date.now() / 1000);
 
-  return rows
+  return results
     .map(({ id, o }) => ({
       id,
       maker: o.maker,
@@ -142,183 +59,112 @@ async function fetchOpenOrders() {
       tokenOut: o.tokenOut.toLowerCase(),
       pool: o.pool.toLowerCase(),
       amountIn: BigInt(o.amountIn),
-      targetSqrtPriceX96: BigInt(o.targetSqrtPriceX96),
       expiry: Number(o.expiry),
       filled: o.filled,
       cancelled: o.cancelled,
       orderType: Number(o.orderType),
+      targetSqrtPriceX96: BigInt(o.targetSqrtPriceX96),
     }))
-    .filter((x) => !x.filled && !x.cancelled && x.expiry > now);
+    .filter((o) => !o.filled && !o.cancelled && o.expiry > now);
 }
 
+// ===================================================
+// 🔹 Simple Pair Key (grouping BUY vs SELL)
+// ===================================================
 function groupKey(a, b, pool) {
   const [x, y] = [a.toLowerCase(), b.toLowerCase()].sort();
   return `${x}-${y}-${pool.toLowerCase()}`;
 }
 
 // ===================================================
-// 🔧 FIXED: Binance-style matching with proper decimal formatting
+// 🔹 Internal Matching Logic (Binance-style)
 // ===================================================
 async function tryInternalMatches() {
-  console.log("🔎 [InternalMatch] Starting internal match scan...");
+  console.log("🔎 Starting internal match scan...");
 
-  const open = await fetchOpenOrders();
-  console.log(`📦 [InternalMatch] Total open orders fetched: ${open.length}`);
-  if (open.length === 0) {
-    console.log("⚠️ [InternalMatch] No open orders found. Exiting early.");
-    return;
-  }
+  const openOrders = await fetchOpenOrders();
+  console.log(`📦 Total open orders: ${openOrders.length}`);
 
+  if (openOrders.length === 0) return;
+
+  // Group by pair + pool
   const groups = new Map();
-  for (const o of open) {
+  for (const o of openOrders) {
     const k = groupKey(o.tokenIn, o.tokenOut, o.pool);
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(o);
   }
-  console.log(`📊 [InternalMatch] Grouped into ${groups.size} token/pool pairs.`);
 
   for (const [key, orders] of groups.entries()) {
     const buys = orders.filter((o) => o.orderType === 0);
     const sells = orders.filter((o) => o.orderType === 1);
     if (!buys.length || !sells.length) continue;
 
-    console.log(`📈 [InternalMatch] Group ${key}: ${buys.length} BUY, ${sells.length} SELL`);
+    console.log(`📈 [Group ${key}] ${buys.length} BUY, ${sells.length} SELL`);
 
-    const { token0, token1 } = await getPoolInfo(orders[0].pool);
+    // Sort BUYs high→low, SELLs low→high
+    buys.sort((a, b) => Number(b.targetSqrtPriceX96) - Number(a.targetSqrtPriceX96));
+    sells.sort((a, b) => Number(a.targetSqrtPriceX96) - Number(b.targetSqrtPriceX96));
 
-    // 🔧 FIX: Get decimals for proper formatting
-    const tokenInAddr = buys[0].tokenIn;
-    const tokenOutAddr = buys[0].tokenOut;
-    const decimalsIn = await getTokenDecimals(tokenInAddr);
-    const decimalsOut = await getTokenDecimals(tokenOutAddr);
+    for (const buy of buys) {
+      if (buy.amountIn === 0n) continue;
+      const buyPrice = (buy.targetSqrtPriceX96);
 
-    const buysEnriched = buys.map((b) => ({
-      ...b,
-      targetPrice1e18: ratio1e18FromSqrt(b.tokenIn, b.tokenOut, token0, token1, b.targetSqrtPriceX96),
-    }));
-    const sellsEnriched = sells.map((s) => ({
-      ...s,
-      targetPrice1e18: ratio1e18FromSqrt(s.tokenIn, s.tokenOut, token0, token1, s.targetSqrtPriceX96),
-    }));
+      for (const sell of sells) {
+        if (sell.amountIn === 0n) continue;
+        const sellPrice = (sell.targetSqrtPriceX96);
 
-    buysEnriched.sort((a, b) =>
-      a.targetPrice1e18 === b.targetPrice1e18 ? 0 : a.targetPrice1e18 > b.targetPrice1e18 ? -1 : 1
-    );
-    sellsEnriched.sort((a, b) =>
-      a.targetPrice1e18 === b.targetPrice1e18 ? 0 : a.targetPrice1e18 < b.targetPrice1e18 ? -1 : 1
-    );
+        // Skip if not opposite pairs
+        if (!(buy.tokenIn === sell.tokenOut && buy.tokenOut === sell.tokenIn && buy.pool === sell.pool))
+          continue;
 
-    for (const b of buysEnriched) {
-      if (b.amountIn === 0n) continue;
+        console.log("--------------------------------------------");
+        console.log(`🟢 BUY#${buy.id} target sqrt=${buy.targetSqrtPriceX96} → price=${buyPrice}`);
+        console.log(`🔴 SELL#${sell.id} target sqrt=${sell.targetSqrtPriceX96} → price=${sellPrice}`);
 
-      for (const s of sellsEnriched) {
-        if (s.amountIn === 0n) continue;
-        if (!(b.tokenIn === s.tokenOut && b.tokenOut === s.tokenIn && b.pool === s.pool)) continue;
+        if (buyPrice >= sellPrice && sellPrice > 0) {
+          console.log(`✅ MATCH: BUY#${buy.id} (${buyPrice}) ≥ SELL#${sell.id} (${sellPrice})`);
 
-        // 🔧 FIX: Format prices properly
-        const buyPriceHuman = formatPrice(b.targetPrice1e18, decimalsIn, decimalsOut);
-        const sellPriceHuman = formatPrice(s.targetPrice1e18, decimalsIn, decimalsOut);
+          const tradeAmount = buy.amountIn < sell.amountIn ? buy.amountIn : sell.amountIn;
+          console.log(`📦 Trade amount: ${tradeAmount.toString()}`);
 
-        const symIn = await getTokenSymbol(b.tokenIn);
-        const symOut = await getTokenSymbol(b.tokenOut);
+          try {
+            const tx = await executor.matchOrders(buy.id, sell.id, { gasLimit: 1_000_000 });
+            console.log(`⛽ Tx sent: ${tx.hash}`);
+            const r = await tx.wait();
+            console.log(`✅ Executed in block ${r.blockNumber}`);
+          } catch (err) {
+            console.log(`⚠️ Failed to execute: ${err.message}`);
+          }
 
-        // 🔧 FIX: Format current price properly
-        let currPriceRaw = 0;
-        try {
-          currPriceRaw = await getCurrentPriceFromContract(b.pool, b.tokenIn, b.tokenOut);
-        } catch (err) {
-          currPriceRaw = 0;
-        }
-        const currPrice = currPriceRaw * Math.pow(10, decimalsOut - decimalsIn);
-
-        console.log("───────────────────────────────────────────────");
-        console.log(`📊 Pair: ${symIn}/${symOut}`);
-        console.log(`💰 Current pool price: ${currPrice.toFixed(8)} ${symOut}/${symIn}`);
-        console.log(`🟢 BUY#${b.id} target: ${buyPriceHuman.toFixed(8)} ${symOut}/${symIn}`);
-        console.log(`🔴 SELL#${s.id} target: ${sellPriceHuman.toFixed(8)} ${symOut}/${symIn}`);
-
-        const canMatch = b.targetPrice1e18 >= s.targetPrice1e18;
-        console.log(
-          `⚖️ Comparison: BUY (${buyPriceHuman.toFixed(8)}) ${canMatch ? "≥" : "<"
-          } SELL (${sellPriceHuman.toFixed(8)}) → ${canMatch ? "✅ Match" : "❌ Skip"
-          }`
-        );
-
-        if (!canMatch) continue;
-
-        // 🔧 FIX: Format trade amount properly
-        const tradeAmount = b.amountIn < s.amountIn ? b.amountIn : s.amountIn;
-        const tradeAmountHuman = formatAmount(tradeAmount, decimalsIn);
-        console.log(`📦 Trade amount: ${tradeAmountHuman.toFixed(6)} ${symIn}`);
-
-        try {
-          console.log(`🚀 Executing BUY#${b.id} ↔ SELL#${s.id} ...`);
-          const tx = await executor.matchOrders(b.id, s.id, { gasLimit: 1_000_000 });
-          console.log(`⛽ Tx sent: ${tx.hash}`);
-          const r = await tx.wait();
-          console.log(`✅ Filled in block ${r.blockNumber}`);
-          console.log("───────────────────────────────────────────────\n");
-
-          if (b.amountIn === tradeAmount) b.amountIn = 0n;
-          else b.amountIn -= tradeAmount;
-
-          if (s.amountIn === tradeAmount) s.amountIn = 0n;
-          else s.amountIn -= tradeAmount;
-
-          if (b.amountIn === 0n) break;
-        } catch (e) {
-          console.log(`⚠️ [InternalMatch] Failed BUY#${b.id} vs SELL#${s.id}: ${e.message}`);
-          console.log("───────────────────────────────────────────────\n");
+          break; // move to next BUY after a match
+        } else {
+          console.log(`❌ No match: BUY=${buyPrice}, SELL=${sellPrice}`);
         }
       }
     }
   }
 
-  console.log("🏁 [InternalMatch] Completed internal match scan.\n");
+  console.log("🏁 Completed internal match scan.\n");
 }
 
 // ===================================================
-// Expired orders cleaner (batch)
-// ===================================================
-async function cleanExpiredOrders(batchSize = 50) {
-  try {
-    const nextId = Number(await executor.nextOrderId());
-    console.log(`🧹 Checking expired orders up to ID ${nextId - 1}`);
-
-    let from = 1;
-    while (from < nextId) {
-      const to = Math.min(from + batchSize - 1, nextId - 1);
-      try {
-        const tx = await executor.distributeExpiredOrders(from, to, { gasLimit: 5_000_000 });
-        console.log(`⛽ Refund ${from}-${to}: ${tx.hash}`);
-        const r = await tx.wait();
-        console.log(`✅ Refunded batch ${from}-${to} in block ${r.blockNumber}`);
-      } catch (e) {
-        console.log(`⚠️ Refund batch ${from}-${to} skipped: ${e.message}`);
-      }
-      from += batchSize;
-    }
-  } catch (err) {
-    console.error("🚨 Expiry cleanup error:", err.message);
-  }
-}
-
-// ===================================================
-// Monitor loop
+// 🔹 Monitor Loop
 // ===================================================
 async function monitorOrders(intervalMs = 10_000) {
   console.log("🔎 Order monitor started...");
   while (true) {
     try {
       await tryInternalMatches();
-    } catch (e) {
-      console.error("🚨 Monitor loop error:", e.message);
+    } catch (err) {
+      console.error("🚨 Loop error:", err.message);
     }
     await new Promise((res) => setTimeout(res, intervalMs));
   }
 }
 
 monitorOrders();
+
 
 
 setInterval(() => cleanExpiredOrders(50), 5 * 60 * 1000);
@@ -425,6 +271,10 @@ const BOT_STATE = {
   nextRun: null,
   pairs: []
 };
+const FACTORY_ADDRESS = "0x83DEFEcaF6079504E2DD1DE2c66DCf3046F7bDD7"; // UniswapV3Factory
+const FACTORY_ABI = [
+  "function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)"
+];
 
 const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
 
