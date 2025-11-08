@@ -108,7 +108,13 @@
 		"type": "function"
 	},
 	{
-		"inputs": [],
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "_swapRouter",
+				"type": "address"
+			}
+		],
 		"stateMutability": "nonpayable",
 		"type": "constructor"
 	},
@@ -145,6 +151,12 @@
 				"internalType": "uint256",
 				"name": "orderId",
 				"type": "uint256"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "refundAmount",
+				"type": "uint256"
 			}
 		],
 		"name": "OrderCancelled",
@@ -169,6 +181,12 @@
 				"indexed": false,
 				"internalType": "uint256",
 				"name": "amountIn",
+				"type": "uint256"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "amountOut",
 				"type": "uint256"
 			},
 			{
@@ -199,7 +217,13 @@
 			{
 				"indexed": false,
 				"internalType": "uint256",
-				"name": "amountTraded",
+				"name": "buyAmount",
+				"type": "uint256"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "sellAmount",
 				"type": "uint256"
 			}
 		],
@@ -227,6 +251,150 @@
 		"name": "ownerWithdraw",
 		"outputs": [],
 		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "buyOrderId",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "sellOrderId",
+				"type": "uint256"
+			}
+		],
+		"name": "canMatch",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "startId",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "count",
+				"type": "uint256"
+			}
+		],
+		"name": "getAllOrders",
+		"outputs": [
+			{
+				"components": [
+					{
+						"internalType": "address",
+						"name": "maker",
+						"type": "address"
+					},
+					{
+						"internalType": "address",
+						"name": "tokenIn",
+						"type": "address"
+					},
+					{
+						"internalType": "address",
+						"name": "tokenOut",
+						"type": "address"
+					},
+					{
+						"internalType": "address",
+						"name": "pool",
+						"type": "address"
+					},
+					{
+						"internalType": "uint256",
+						"name": "amountIn",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "amountOut",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "amountOutMin",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint160",
+						"name": "targetSqrtPriceX96",
+						"type": "uint160"
+					},
+					{
+						"internalType": "bool",
+						"name": "triggerAbove",
+						"type": "bool"
+					},
+					{
+						"internalType": "uint256",
+						"name": "expiry",
+						"type": "uint256"
+					},
+					{
+						"internalType": "bool",
+						"name": "filled",
+						"type": "bool"
+					},
+					{
+						"internalType": "bool",
+						"name": "cancelled",
+						"type": "bool"
+					},
+					{
+						"internalType": "bool",
+						"name": "claimed",
+						"type": "bool"
+					},
+					{
+						"internalType": "enum LimitOrderExecutor.OrderType",
+						"name": "orderType",
+						"type": "uint8"
+					}
+				],
+				"internalType": "struct LimitOrderExecutor.Order[]",
+				"name": "",
+				"type": "tuple[]"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "pool",
+				"type": "address"
+			}
+		],
+		"name": "getCurrentPoolPrice",
+		"outputs": [
+			{
+				"internalType": "uint160",
+				"name": "sqrtPriceX96",
+				"type": "uint160"
+			},
+			{
+				"internalType": "int24",
+				"name": "tick",
+				"type": "int24"
+			}
+		],
+		"stateMutability": "view",
 		"type": "function"
 	},
 	{
@@ -264,6 +432,11 @@
 					{
 						"internalType": "uint256",
 						"name": "amountIn",
+						"type": "uint256"
+					},
+					{
+						"internalType": "uint256",
+						"name": "amountOut",
 						"type": "uint256"
 					},
 					{
@@ -318,25 +491,6 @@
 	{
 		"inputs": [
 			{
-				"internalType": "uint256",
-				"name": "orderId",
-				"type": "uint256"
-			}
-		],
-		"name": "getOrderPrice1e18",
-		"outputs": [
-			{
-				"internalType": "uint256",
-				"name": "ratio1e18",
-				"type": "uint256"
-			}
-		],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{
 				"internalType": "address",
 				"name": "pool",
 				"type": "address"
@@ -364,92 +518,6 @@
 		"type": "function"
 	},
 	{
-		"inputs": [
-			{
-				"internalType": "address",
-				"name": "user",
-				"type": "address"
-			}
-		],
-		"name": "getUserOrders",
-		"outputs": [
-			{
-				"components": [
-					{
-						"internalType": "address",
-						"name": "maker",
-						"type": "address"
-					},
-					{
-						"internalType": "address",
-						"name": "tokenIn",
-						"type": "address"
-					},
-					{
-						"internalType": "address",
-						"name": "tokenOut",
-						"type": "address"
-					},
-					{
-						"internalType": "address",
-						"name": "pool",
-						"type": "address"
-					},
-					{
-						"internalType": "uint256",
-						"name": "amountIn",
-						"type": "uint256"
-					},
-					{
-						"internalType": "uint256",
-						"name": "amountOutMin",
-						"type": "uint256"
-					},
-					{
-						"internalType": "uint160",
-						"name": "targetSqrtPriceX96",
-						"type": "uint160"
-					},
-					{
-						"internalType": "bool",
-						"name": "triggerAbove",
-						"type": "bool"
-					},
-					{
-						"internalType": "uint256",
-						"name": "expiry",
-						"type": "uint256"
-					},
-					{
-						"internalType": "bool",
-						"name": "filled",
-						"type": "bool"
-					},
-					{
-						"internalType": "bool",
-						"name": "cancelled",
-						"type": "bool"
-					},
-					{
-						"internalType": "bool",
-						"name": "claimed",
-						"type": "bool"
-					},
-					{
-						"internalType": "enum LimitOrderExecutor.OrderType",
-						"name": "orderType",
-						"type": "uint8"
-					}
-				],
-				"internalType": "struct LimitOrderExecutor.Order[]",
-				"name": "",
-				"type": "tuple[]"
-			}
-		],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
 		"inputs": [],
 		"name": "nextOrderId",
 		"outputs": [
@@ -468,6 +536,19 @@
 		"outputs": [
 			{
 				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "swapRouter",
+		"outputs": [
+			{
+				"internalType": "contract ISwapRouter",
 				"name": "",
 				"type": "address"
 			}
