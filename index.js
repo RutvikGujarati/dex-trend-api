@@ -24,14 +24,6 @@ const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, EXECUTOR_ABI, wallet);
 
 // ===================================================
-// 🔹 Decode sqrtPriceX96 → Normal Price
-// ===================================================
-function decodePriceFromSqrt(sqrtPriceX96) {
-  const sqrt = Number(sqrtPriceX96) / 2 ** 96;
-  return sqrt * sqrt;
-}
-
-// ===================================================
 // 🔹 Fetch All Open Orders
 // ===================================================
 async function fetchOpenOrders() {
@@ -79,73 +71,103 @@ function groupKey(a, b, pool) {
 // ===================================================
 // 🔹 Internal Matching Logic (Binance-style)
 // ===================================================
+const tokenCache = new Map();
+
+async function getTokenSymbol(addr, providerOrSigner) {
+  const provider =
+    providerOrSigner.provider || providerOrSigner; // ensure real provider
+
+  const key = addr.toLowerCase();
+  if (tokenCache.has(key)) return tokenCache.get(key);
+
+  try {
+    const token = new ethers.Contract(addr, ERC20_ABI, provider);
+    const symbol = await token.symbol();
+    tokenCache.set(key, symbol);
+    return symbol;
+  } catch (err) {
+    console.warn(`⚠️ Failed to fetch symbol for ${addr}: ${err.message}`);
+    const fallback = addr.slice(0, 6);
+    tokenCache.set(key, fallback);
+    return fallback;
+  }
+}
+
 async function tryInternalMatches() {
-  console.log("🔎 Starting internal match scan...");
+  console.log("\n🔍 Checking for internal matches...");
 
   const openOrders = await fetchOpenOrders();
   console.log(`📦 Total open orders: ${openOrders.length}`);
 
   if (openOrders.length === 0) return;
 
-  // Group by pair + pool
+  // Group orders by token pair + pool
   const groups = new Map();
   for (const o of openOrders) {
-    const k = groupKey(o.tokenIn, o.tokenOut, o.pool);
-    if (!groups.has(k)) groups.set(k, []);
-    groups.get(k).push(o);
+    const key = groupKey(o.tokenIn, o.tokenOut, o.pool);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(o);
   }
 
   for (const [key, orders] of groups.entries()) {
+    if (!orders.length) continue;
+
+    // Fetch token symbols dynamically (once per group)
+    const example = orders[0];
+    const tokenInSym = await getTokenSymbol(example.tokenIn, provider);
+    const tokenOutSym = await getTokenSymbol(example.tokenOut, provider);
+
     const buys = orders.filter((o) => o.orderType === 0);
     const sells = orders.filter((o) => o.orderType === 1);
     if (!buys.length || !sells.length) continue;
 
-    console.log(`📈 [Group ${key}] ${buys.length} BUY, ${sells.length} SELL`);
+    console.log(`\n🔹 ${tokenInSym}/${tokenOutSym} [Pool: ${example.pool.slice(0, 8)}...]`);
+    console.log(`   🟢 BUY: ${buys.length} | 🔴 SELL: ${sells.length}`);
 
-    // Sort BUYs high→low, SELLs low→high
+    // Sort BUY high→low, SELL low→high
     buys.sort((a, b) => Number(b.targetSqrtPriceX96) - Number(a.targetSqrtPriceX96));
     sells.sort((a, b) => Number(a.targetSqrtPriceX96) - Number(b.targetSqrtPriceX96));
 
     for (const buy of buys) {
-      if (buy.amountIn === 0n) continue;
-      const buyPrice = (buy.targetSqrtPriceX96);
-
       for (const sell of sells) {
-        if (sell.amountIn === 0n) continue;
-        const sellPrice = (sell.targetSqrtPriceX96);
-
-        // Skip if not opposite pairs
-        if (!(buy.tokenIn === sell.tokenOut && buy.tokenOut === sell.tokenIn && buy.pool === sell.pool))
+        if (
+          !(buy.tokenIn === sell.tokenOut &&
+            buy.tokenOut === sell.tokenIn &&
+            buy.pool === sell.pool)
+        )
           continue;
 
-        console.log("--------------------------------------------");
-        console.log(`🟢 BUY#${buy.id} target sqrt=${buy.targetSqrtPriceX96} → price=${buyPrice}`);
-        console.log(`🔴 SELL#${sell.id} target sqrt=${sell.targetSqrtPriceX96} → price=${sellPrice}`);
+        const buyPrice = parseFloat(ethers.formatUnits(buy.targetSqrtPriceX96, 18)).toFixed(6);
+        const sellPrice = parseFloat(ethers.formatUnits(sell.targetSqrtPriceX96, 18)).toFixed(6);
+
+        console.log(
+          `   🔄 BUY#${buy.id}(${tokenInSym}→${tokenOutSym}, ${buyPrice}) vs SELL#${sell.id}(${tokenOutSym}→${tokenInSym}, ${sellPrice})`
+        );
 
         if (buyPrice >= sellPrice && sellPrice > 0) {
-          console.log(`✅ MATCH: BUY#${buy.id} (${buyPrice}) ≥ SELL#${sell.id} (${sellPrice})`);
+          console.log(
+            `   ✅ Match found! BUY#${buy.id} ≥ SELL#${sell.id} | Price: ${buyPrice} ≥ ${sellPrice}`
+          );
 
           const tradeAmount = buy.amountIn < sell.amountIn ? buy.amountIn : sell.amountIn;
-          console.log(`📦 Trade amount: ${tradeAmount.toString()}`);
+          console.log(`   💰 Trade amount: ${tradeAmount.toString()}`);
 
           try {
             const tx = await executor.matchOrders(buy.id, sell.id, { gasLimit: 1_000_000 });
-            console.log(`⛽ Tx sent: ${tx.hash}`);
-            const r = await tx.wait();
-            console.log(`✅ Executed in block ${r.blockNumber}`);
+            console.log(`   ⛽ Tx: ${tx.hash}`);
+            const receipt = await tx.wait();
+            console.log(`   ✅ Executed successfully in block ${receipt.blockNumber}`);
           } catch (err) {
-            console.log(`⚠️ Failed to execute: ${err.message}`);
+            console.log(`   ⚠️ Failed to execute: ${err.message}`);
           }
 
-          break; // move to next BUY after a match
-        } else {
-          console.log(`❌ No match: BUY=${buyPrice}, SELL=${sellPrice}`);
+          break; // move to next BUY after successful match
         }
       }
     }
   }
 
-  console.log("🏁 Completed internal match scan.\n");
+  console.log("\n🏁 Done scanning for matches.\n");
 }
 
 // ===================================================
@@ -164,10 +186,6 @@ async function monitorOrders(intervalMs = 10_000) {
 }
 
 monitorOrders();
-
-
-
-setInterval(() => cleanExpiredOrders(50), 5 * 60 * 1000);
 
 // ===================================================
 // Tiny Express API
