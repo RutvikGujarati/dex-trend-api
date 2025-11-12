@@ -22,9 +22,8 @@ const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
 const swapRouter = new ethers.Contract(SWAP_ROUTER_ADDRESS, SWAP_ROUTER_ABI, wallet);
 
 const TOKENS = {
-    USDC: "0x553fE3CA2A5F304857A7c2C78b37686716B8c89b",
     USDT: "0xC26efb6DB570DEE4BD0541A1ed52B590F05E3E3B",
-    ETH: "0xc671a7a0Bcef13018B384F5af9f4696Aba5Ff0F1"
+    ETH: "0x3EA0A47aC1CfbB7A3633B7FD33e01eC69fc88ad6"
 };
 
 const FEE = 500; // 0.05%
@@ -78,7 +77,6 @@ async function getMarketPrices() {
         return {
             ETH: data.ethereum.usd,
             USDT: data.tether.usd,
-            USDC: data["usd-coin"].usd
         };
     } catch (err) {
         console.error("⚠ Failed to fetch prices", err.message);
@@ -109,7 +107,7 @@ function getSwapAmount(pd, tA, targetPrice) {
     const scaleFactor = 1e-18;
 
     // ✅ Apply a gradual step (e.g., 20% of full amount)
-    const STEP = 0.01; // 20% of full swap
+    const STEP = 0.0001; // 20% of full swap
     amount = amount * STEP;
 
     return { tokenIn, tokenOut, amount: amount * scaleFactor };
@@ -242,9 +240,9 @@ async function main() {
     const market = await getMarketPrices();
     if (!market) return;
 
-    await rebalance(TOKENS.ETH, TOKENS.USDC, market);
+    // await rebalance(TOKENS.ETH, TOKENS.USDC, market);
     await rebalance(TOKENS.ETH, TOKENS.USDT, market);
-    await rebalance(TOKENS.USDT, TOKENS.USDC, market);
+    // await rebalance(TOKENS.USDT, TOKENS.USDC, market);
 }
 
 main();
