@@ -23,7 +23,7 @@ const swapRouter = new ethers.Contract(SWAP_ROUTER_ADDRESS, SWAP_ROUTER_ABI, wal
 
 const TOKENS = {
     USDT: "0xC26efb6DB570DEE4BD0541A1ed52B590F05E3E3B",
-    ETH: "0x3EA0A47aC1CfbB7A3633B7FD33e01eC69fc88ad6"
+    ETH: "0x024b8A87BE821B27aAaecb878fDBd3F49ad3bcb2"
 };
 
 const FEE = 500; // 0.05%
