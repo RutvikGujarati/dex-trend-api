@@ -13,7 +13,7 @@ const require = createRequire(import.meta.url);
 // ---- CONFIG ----
 const RPC_URL = process.env.RPC_URL || "https://api.skyhighblockchain.com";
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const EXECUTOR_ADDRESS = "0x0685ceAd5D9653C29B54b2B53E2c6454C074eBdB";
+const EXECUTOR_ADDRESS = "0x519c11Bb3e09F89E5393c8F10A26c0D2B9b8d188";
 
 // ---- ABIs ----
 const EXECUTOR_ABI = require("./ABI/ABI.json");
