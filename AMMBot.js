@@ -2,7 +2,7 @@ import { ethers } from "ethers";
 import dotenv from "dotenv";
 import axios from "axios";
 import { createRequire } from "module";
-import { COINGECKO_IDS } from "./constants.js";
+import { COINGECKO_IDS, POOL_MAP, TOKENS } from "./constants.js";
 
 dotenv.config();
 const require = createRequire(import.meta.url);
@@ -21,37 +21,6 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
 const swapRouter = new ethers.Contract(SWAP_ROUTER_ADDRESS, SWAP_ROUTER_ABI, wallet);
-
-const TOKENS = {
-    USDT: "0xC26efb6DB570DEE4BD0541A1ed52B590F05E3E3B",
-
-    // ETH: "0x024b8A87BE821B27aAaecb878fDBd3F49ad3bcb2",
-    USDC: "0x0A7d0AA33FD217A8b7818A6da40b45603C4c367E",
-    MATIC: "0x2bf5F367B1559a93f1FAF4A194478E707738F6bD",
-    BTC: "0x0133394e4A539F81Ec51b81dE77f1BeBF6497946",
-    BNB: "0xb4753c1EDDE1D79ec36363F116D2E7DF4dec0402",
-    SOL: "0xb4306EceB7Bb2a363F8344575Fc75ab388206A01",
-    DOGE: "0x1F35acD37d2fe4c533c1774a76F0b7dCba76D609",
-    TRX: "0xb077F3E3fC7A102BAE0D77930108c4b15e280054",
-    ADA: "0x54B037Ac3b58C221e86B4f3DeD5922f7CD084769",
-    HYPE: "0xBd2Ae006376Bd45432153c0C08189daC2706aADF",
-    USDE: "0x5BB6551b030f3609f1076C9433Ab8A3a3BAFFa8C",
-    LINK: "0x944c1FFD41Bf305b4dCc37F7D1648829b41f4758",
-    AVAX: "0x111915A20361a2c46a508c53Af5DeA1ed01DC0F2",
-    XLM: "0xC38C3a89460D6c57fd5f77b00c854bf7D3686C8D",
-    SUI: "0x606e4b1b1405fE226C7ddC491B85Ad5003717E08",
-    HBAR: "0xDecfe53d2998F954709B144e846814d40ad8e9f2",
-    LEO: "0x628BaDb5E5Cc743e710dc5161bA9614fE360aBe2",
-    TON: "0x96A95F5A25A6b3d0658e261e69965Dd9E4b0789F",
-    DOT: "0xCbc7Be8802E930ddC8BDf08E3bcDBd58E30B5d44",
-    GALA: "0x818fE6CC6f48e4379b89f449483A8eEDEA330425",
-    ENA: "0xfBCE373dC5201916CFaf627f4fCc307b9010D3e0",
-    LDO: "0x9181F63E1092B65B0c6271f0D649EB1183dFd2b6"
-};
-const POOL_MAP = {
-    "USDC_USDT": "0xcA9b35D3F61c816246E6828440feC94bb43c8f12"
-};
-
 
 const FEE = 500; // 0.05%
 
@@ -142,8 +111,6 @@ async function getPoolData(tA, tB) {
     };
 }
 
-
-
 // =============== MARKET PRICE FETCHER ===============
 
 async function getMarketPrices() {
@@ -179,13 +146,31 @@ async function getMarketPrices() {
 
 // =============== PRICE CALCULATION LOGIC ===============
 
-function getSwapAmount(pd, tA, targetPrice, decimals) {
-    const minimal = getMinimalAmount(decimals);  // use smallest safe size
-    return {
-        tokenIn: pd.price < targetPrice ? pd.token1 : pd.token0,
-        tokenOut: pd.price < targetPrice ? pd.token0 : pd.token1,
-        amount: minimal
-    };
+function getSwapAmount(pd, tA, targetPrice) {
+    const poolToken0 = pd.token0.toLowerCase();
+    const tA_l = tA.toLowerCase();
+    const targetPricePool = poolToken0 === tA_l ? targetPrice : 1 / targetPrice;
+
+    const s = pd.sqrtPrice;
+    const sTarget = Math.sqrt(targetPricePool);
+    const L = pd.liquidity;
+    if (!isFinite(s) || !isFinite(sTarget) || !isFinite(L) || L <= 0) return null;
+
+    const needToken1 = sTarget > s;
+    const tokenIn = needToken1 ? pd.token1 : pd.token0;
+    const tokenOut = needToken1 ? pd.token0 : pd.token1;
+
+    // Full theoretical amount
+    let amount = needToken1 ? L * (sTarget - s) : L * (1 / sTarget - 1 / s);
+    if (amount <= 0) return null;
+
+    const scaleFactor = 1e-18;
+
+    // ✅ Apply a gradual step (e.g., 20% of full amount)
+    const STEP = 0.0001; // 20% of full swap
+    amount = amount * STEP;
+
+    return { tokenIn, tokenOut, amount: amount * scaleFactor };
 }
 
 

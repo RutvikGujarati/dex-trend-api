@@ -1,6 +1,7 @@
 import { ethers } from "ethers";
 import dotenv from "dotenv";
 import { createRequire } from "module";
+import { TOKENS } from "./constants.js";
 const require = createRequire(import.meta.url);
 dotenv.config();
 
@@ -20,31 +21,6 @@ console.log("💼 Wallet address:", wallet.address);
 
 const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, EXECUTOR_ABI, wallet);
-
-// ===== TOKENS =====
-const TOKENS = {
-    USDT: "0xC26efb6DB570DEE4BD0541A1ed52B590F05E3E3B",
-    SOL: "0x9c3450b3F6e6c2e507624248a56Fa4A561c56341",
-    BNB:"0xCA1BCb9969A3d8D52E74Cd3901692e9A8a323af1",
-    DODGE: "0xaFa5c971197Fd71C13fF1288760CbB2C02685762",
-    TRX:"0xCe0B826cE613392B081DF1f5530c923Df8122318",
-    CARDANO:"0xede25454E7F50a925BA00174164E0C6d818E4b25",
-    HYPE:"0xE33bB94634993FD4ED3BFA0393b241eA2c421FC9",
-    USDE:"0xdb89A380171339c14ce316E2c7c32e8aCD8037fb",
-    LINK:"0xC2fcF23Fad9c5Be08bD07E3955e8A0F31B0800bA",
-    AVAX:"0xb6714316dE097AA83B4E2bAf0A22FeB490fE3f98",
-    XLM:"0xfE1FA246e89b016a9aD89d8fE859779a19953B60",
-    SUI:"0x6f4fe748B6f314144D0cEfdC93f322e9BB484a9e",
-    HDR:"0x527F81c964c22c93fd613EE82661499C0f466c38",
-    PALKADOT:"0xA432ED2326aA53Fe959E9B2110c4958ADb1FFdBB",
-    LEO:"0x1AD308131c715955dEbe2Df748B6C4769C5Dc626",
-    SHIB:"0xC9b6B70b5c4CBA9DA3871Ea63a64E5D76d259520",
-    TON:"0x4f665Ef2EF5336D26a6c06525DD812786E5614c6",
-    PLK:"0xA432ED2326aA53Fe959E9B2110c4958ADb1FFdBB",
-    GALA:"0xDA9077EEC87279253B4F9b375Cf5B4e2de5C10be",
-    ENA:"0xD154A41aFA7c7Ad17f6B2de930f6E63f33Aa41C2",
-    LIDO:"0x2370C9aA0C996AF2C0D5eB47190B4C9d3426f085"
-};
 const FEE = 500;
 
 function encodeSimplePrice(price) {
@@ -111,10 +87,10 @@ async function main() {
 
     // --- SOL/USDT: 50 BUY below 0.9, 50 SELL above 1 ---
     for (let i = 0; i < 25; i++) {
-        const price = 0.6- i * 0.001; // gradually lower buy prices
+        const price = 0.9- i * 0.001; // gradually lower buy prices
         orders.push({
             tokenIn: TOKENS.USDT,
-            tokenOut: TOKENS.SUI,
+            tokenOut: TOKENS.USDC,
             amountInHuman: randomAmount(),
             priceTarget: price,
             orderType: 0, // BUY
@@ -124,9 +100,9 @@ async function main() {
     }
  
     for (let i = 0; i < 25; i++) {
-        const price = 0.7 + i * 0.001; // gradually higher sell prices
+        const price = 1.1 + i * 0.001; // gradually higher sell prices
         orders.push({
-            tokenIn: TOKENS.SUI,
+            tokenIn: TOKENS.USDC,
             tokenOut: TOKENS.USDT,
             amountInHuman: randomAmount(),
             priceTarget: price,
