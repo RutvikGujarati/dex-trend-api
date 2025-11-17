@@ -1,5 +1,6 @@
 import { ethers } from "ethers";
 import dotenv from "dotenv";
+import { NonceManager } from "ethers";
 import axios from "axios";
 import { createRequire } from "module";
 import { COINGECKO_IDS, POOL_MAP, TOKENS } from "./constants.js";
@@ -20,8 +21,8 @@ if (!RPC_URL || !PRIVATE_KEY || !FACTORY_ADDRESS || !SWAP_ROUTER_ADDRESS) {
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
-const swapRouter = new ethers.Contract(SWAP_ROUTER_ADDRESS, SWAP_ROUTER_ABI, wallet);
-
+const walletNM = new NonceManager(wallet);
+const swapRouter = new ethers.Contract(SWAP_ROUTER_ADDRESS, SWAP_ROUTER_ABI, walletNM);
 const FEE = 500; // 0.05%
 
 // =============== UTIL FUNCTIONS ===============
@@ -197,8 +198,11 @@ async function swap(tIn, tOut, amt, dec) {
     ];
 
     try {
-        const tx = await swapRouter.exactInputSingle(params, { gasLimit: 500_000 });
-        await tx.wait();
+        const nonce = await provider.getTransactionCount(wallet.address, "latest");
+        const tx = await swapRouter.exactInputSingle(params, {
+            gasLimit: 500000,
+            nonce
+        }); await tx.wait();
         console.log(`  ✓ Swap successful`);
         return true;
     } catch (err) {
