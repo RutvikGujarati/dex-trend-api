@@ -86,11 +86,11 @@ async function main() {
     const orders = [];
 
     // --- SOL/USDT: 50 BUY below 0.9, 50 SELL above 1 ---
-    for (let i = 0; i < 25; i++) {
-        const price = 0.9- i * 0.001; // gradually lower buy prices
+    for (let i = 0; i < 15; i++) {
+        const price = 3130 - i * 0.001; // gradually lower buy prices
         orders.push({
             tokenIn: TOKENS.USDT,
-            tokenOut: TOKENS.USDC,
+            tokenOut: TOKENS.ETH,
             amountInHuman: randomAmount(),
             priceTarget: price,
             orderType: 0, // BUY
@@ -99,10 +99,10 @@ async function main() {
         });
     }
  
-    for (let i = 0; i < 25; i++) {
-        const price = 1.1 + i * 0.001; // gradually higher sell prices
+    for (let i = 0; i < 15; i++) {
+        const price = 3130 + i * 0.001; // gradually higher sell prices
         orders.push({
-            tokenIn: TOKENS.USDC,
+            tokenIn: TOKENS.ETH,
             tokenOut: TOKENS.USDT,
             amountInHuman: randomAmount(),
             priceTarget: price,

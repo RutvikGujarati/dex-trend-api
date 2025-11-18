@@ -169,6 +169,43 @@ async function tryInternalMatches() {
 
   console.log("\n🏁 Done scanning for matches.\n");
 }
+// ===================================================
+// 🔹 Sweep Expired Orders (calls distributeExpiredOrders)
+// ===================================================
+async function sweepExpiredOrders() {
+  try {
+    const nextIdBN = await executor.nextOrderId();
+    const nextId = Number(nextIdBN ?? 0);
+
+    if (nextId <= 1) return;
+
+    const batchSize = 50; // process 50 ids at once
+    let from = 1;
+    let to = Math.min(batchSize, nextId - 1);
+
+    while (from <= nextId - 1) {
+      try {
+        const tx = await executor.distributeExpiredOrders(from, to, {
+          gasLimit: 2_000_000
+        });
+
+        console.log(`🧹 Expired Sweep: ${from} → ${to}`);
+        console.log(`⛽ Tx: ${tx.hash}`);
+
+        await tx.wait();
+        console.log(`   ✅ Sweep completed.`);
+      } catch (err) {
+        console.log(`   ⚠️ Sweep failed for range ${from}-${to}: ${err.message}`);
+      }
+
+      // Move next batch
+      from = to + 1;
+      to = Math.min(from + batchSize - 1, nextId - 1);
+    }
+  } catch (err) {
+    console.error("❌ sweepExpiredOrders() error:", err.message);
+  }
+}
 
 // ===================================================
 // 🔹 Monitor Loop
@@ -184,9 +221,23 @@ async function monitorOrders(intervalMs = 10_000) {
     await new Promise((res) => setTimeout(res, intervalMs));
   }
 }
+async function startSweeper(intervalMs = 60_000) {
+  console.log("🧹 Expired order sweeper started...");
+
+  while (true) {
+    try {
+      await sweepExpiredOrders();
+    } catch (err) {
+      console.log("🔁 Sweeper loop error:", err.message);
+    }
+
+    await new Promise((res) => setTimeout(res, intervalMs));
+  }
+}
+
 
 monitorOrders();
-
+startSweeper(30000);
 // ===================================================
 // Tiny Express API
 // ===================================================

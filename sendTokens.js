@@ -2,22 +2,18 @@ import { ethers } from "ethers";
 import * as dotenv from "dotenv";
 dotenv.config();
 
-// ==========================================
-// DESTINATION ADDRESS
-// ==========================================
-const RECEIVER = "0xcF96a4F1A09000b19c2b2e456460E48bf6a7A02D";
+// Destination address
+const RECEIVER = "0x950a18f6796defe5f52e223f184e186b8ddf3664";
 
-// ==========================================
-// TOKEN LIST (UPDATED ADDRESSES)
-// ==========================================
+// Token list
 const TOKENS = [
     "0x61958f3DB9db9BED7beefB3Def3470f0f07629BB", // USDT
-    "0x0A7d0AA33FD217A8b7818A6da40b45603C4c367E", // USDC (FAILED DEPLOYMENT)
+    "0x0A7d0AA33FD217A8b7818A6da40b45603C4c367E", // USDC
     "0x0703F58602aB1a8a84c1812486a8b4Cf07c5A5Da", // ETH
     "0x2bf5F367B1559a93f1FAF4A194478E707738F6bD", // MATIC
     "0x0133394e4A539F81Ec51b81dE77f1BeBF6497946", // BTC
     "0xb4753c1EDDE1D79ec36363F116D2E7DF4dec0402", // BNB
-    "0xb4306EceB7Bb2a363F8344575Fc75ab388206A01", // SOL (FAILED DEPLOYMENT)
+    "0xb4306EceB7Bb2a363F8344575Fc75ab388206A01", // SOL
     "0x1F35acD37d2fe4c533c1774a76F0b7dCba76D609", // DOGE
     "0xb077F3E3fC7A102BAE0D77930108c4b15e280054", // TRX
     "0x54B037Ac3b58C221e86B4f3DeD5922f7CD084769", // ADA
@@ -37,58 +33,38 @@ const TOKENS = [
     "0x9181F63E1092B65B0c6271f0D649EB1183dFd2b6", // LIDO (LDO)
 ];
 
-// Minimal ERC20 ABI
 const ERC20_ABI = [
-    "function decimals() view returns (uint8)",
     "function balanceOf(address) view returns (uint256)",
     "function transfer(address,uint256) returns (bool)"
 ];
 
-// Amount to send (10,000 tokens)
-const AMOUNT = "10000";
-
-// ==========================================
-// SETUP PROVIDER AND WALLET
-// ==========================================
 const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
 const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
 
-// ==========================================
-// SENDER FUNCTION
-// ==========================================
 async function sendAllTokens() {
-    console.log("\n🚀 Starting bulk token sender...\n");
+    console.log("\n🚀 Starting bulk max-balance sender...\n");
 
     for (const tokenAddr of TOKENS) {
-        if (tokenAddr === "0x0000000000000000000000000000000000000000") {
-            console.log(`\n⚠️ Skipping token: invalid address (failed deployment)`);
-            continue;
-        }
-
         try {
             const token = new ethers.Contract(tokenAddr, ERC20_ABI, wallet);
-
-            const decimals = await token.decimals();
-            const amount = ethers.parseUnits(AMOUNT, decimals);
 
             const balance = await token.balanceOf(wallet.address);
 
             console.log(`\n🔍 Token: ${tokenAddr}`);
             console.log(`   Balance: ${balance}`);
 
-            if (balance < amount) {
-                console.log("   ❌ Not enough balance, skipping...");
+            if (balance === 0n) {
+                console.log("   ❌ No balance, skipping...");
                 continue;
             }
 
-            console.log(`   ⏳ Sending ${AMOUNT} tokens...`);
+            console.log(`   ⏳ Sending full balance...`);
 
-            const tx = await token.transfer(RECEIVER, amount);
+            const tx = await token.transfer(RECEIVER, balance);
             console.log(`   📤 Tx sent: ${tx.hash}`);
 
             await tx.wait();
             console.log(`   ✅ SUCCESS`);
-
         } catch (e) {
             console.log(`   ⚠️ Error sending token: ${tokenAddr}`);
             console.log(`   Details: ${e.message}`);
