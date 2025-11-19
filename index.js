@@ -170,42 +170,82 @@ async function tryInternalMatches() {
   console.log("\n🏁 Done scanning for matches.\n");
 }
 // ===================================================
-// 🔹 Sweep Expired Orders (calls distributeExpiredOrders)
+// 🔹 swap Expired Orders (calls distributeExpiredOrders)
 // ===================================================
-async function sweepExpiredOrders() {
+const sweptOrders = new Set();
+
+async function swapExpiredOrders() {
   try {
     const nextIdBN = await executor.nextOrderId();
     const nextId = Number(nextIdBN ?? 0);
+    const now = Math.floor(Date.now() / 1000);
 
     if (nextId <= 1) return;
 
-    const batchSize = 50; // process 50 ids at once
-    let from = 1;
-    let to = Math.min(batchSize, nextId - 1);
+    console.log("\n🔎 Checking for expired orders...");
 
-    while (from <= nextId - 1) {
+    // 1️⃣ Collect all orders once
+    const tasks = [];
+    for (let id = 1; id < nextId; id++) {
+      // skip already swept orders
+      if (sweptOrders.has(id)) continue;
+
+      tasks.push(
+        executor.getOrder(id).then(o => ({ id, o })).catch(() => null)
+      );
+    }
+
+    const results = (await Promise.all(tasks)).filter(Boolean);
+
+    // 2️⃣ Filter expired + not filled + not cancelled + not previously swept
+    const expired = results
+      .filter(({ id, o }) =>
+        !o.filled &&
+        !o.cancelled &&
+        Number(o.expiry) < now &&
+        !sweptOrders.has(id)
+      )
+      .map(({ id }) => id);
+
+    console.log(`📦 Expired (unswept) orders: ${expired.length}`);
+
+    // 3️⃣ If none → stop
+    if (expired.length === 0) {
+      console.log("🟢 No new expired orders — skipping swap.");
+      return;
+    }
+
+    // 4️⃣ Batch by 50 and swap
+    const batchSize = 50;
+    for (let i = 0; i < expired.length; i += batchSize) {
+      const batch = expired.slice(i, i + batchSize);
+      const from = batch[0];
+      const to = batch[batch.length - 1];
+
+      console.log(`🧹 Sweeping expired batch: ${from} → ${to}`);
+
       try {
         const tx = await executor.distributeExpiredOrders(from, to, {
           gasLimit: 2_000_000
         });
-
-        console.log(`🧹 Expired Sweep: ${from} → ${to}`);
         console.log(`⛽ Tx: ${tx.hash}`);
 
         await tx.wait();
         console.log(`   ✅ Sweep completed.`);
-      } catch (err) {
-        console.log(`   ⚠️ Sweep failed for range ${from}-${to}: ${err.message}`);
-      }
 
-      // Move next batch
-      from = to + 1;
-      to = Math.min(from + batchSize - 1, nextId - 1);
+        // 5️⃣ Mark these orders as swept
+        for (const id of batch) sweptOrders.add(id);
+
+      } catch (err) {
+        console.log(`   ❌ Sweep failed for ${from}-${to}: ${err.message}`);
+      }
     }
+
   } catch (err) {
-    console.error("❌ sweepExpiredOrders() error:", err.message);
+    console.error("❌ swapExpiredOrders() error:", err.message);
   }
 }
+
 
 // ===================================================
 // 🔹 Monitor Loop
@@ -221,14 +261,14 @@ async function monitorOrders(intervalMs = 10_000) {
     await new Promise((res) => setTimeout(res, intervalMs));
   }
 }
-async function startSweeper(intervalMs = 60_000) {
-  console.log("🧹 Expired order sweeper started...");
+async function startswaper(intervalMs = 10_000) {
+  console.log("🧹 Expired order swaper started...");
 
   while (true) {
     try {
-      await sweepExpiredOrders();
+      await swapExpiredOrders();
     } catch (err) {
-      console.log("🔁 Sweeper loop error:", err.message);
+      console.log("🔁 swaper loop error:", err.message);
     }
 
     await new Promise((res) => setTimeout(res, intervalMs));
@@ -237,7 +277,7 @@ async function startSweeper(intervalMs = 60_000) {
 
 
 monitorOrders();
-startSweeper(30000);
+startswaper();
 // ===================================================
 // Tiny Express API
 // ===================================================
