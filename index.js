@@ -174,77 +174,77 @@ async function tryInternalMatches() {
 // ===================================================
 const sweptOrders = new Set();
 
-async function swapExpiredOrders() {
-  try {
-    const nextIdBN = await executor.nextOrderId();
-    const nextId = Number(nextIdBN ?? 0);
-    const now = Math.floor(Date.now() / 1000);
+// async function swapExpiredOrders() {
+//   try {
+//     const nextIdBN = await executor.nextOrderId();
+//     const nextId = Number(nextIdBN ?? 0);
+//     const now = Math.floor(Date.now() / 1000);
 
-    if (nextId <= 1) return;
+//     if (nextId <= 1) return;
 
-    console.log("\n🔎 Checking for expired orders...");
+//     console.log("\n🔎 Checking for expired orders...");
 
-    // 1️⃣ Collect all orders once
-    const tasks = [];
-    for (let id = 1; id < nextId; id++) {
-      // skip already swept orders
-      if (sweptOrders.has(id)) continue;
+//     // 1️⃣ Collect all orders once
+//     const tasks = [];
+//     for (let id = 1; id < nextId; id++) {
+//       // skip already swept orders
+//       if (sweptOrders.has(id)) continue;
 
-      tasks.push(
-        executor.getOrder(id).then(o => ({ id, o })).catch(() => null)
-      );
-    }
+//       tasks.push(
+//         executor.getOrder(id).then(o => ({ id, o })).catch(() => null)
+//       );
+//     }
 
-    const results = (await Promise.all(tasks)).filter(Boolean);
+//     const results = (await Promise.all(tasks)).filter(Boolean);
 
-    // 2️⃣ Filter expired + not filled + not cancelled + not previously swept
-    const expired = results
-      .filter(({ id, o }) =>
-        !o.filled &&
-        !o.cancelled &&
-        Number(o.expiry) < now &&
-        !sweptOrders.has(id)
-      )
-      .map(({ id }) => id);
+//     // 2️⃣ Filter expired + not filled + not cancelled + not previously swept
+//     const expired = results
+//       .filter(({ id, o }) =>
+//         !o.filled &&
+//         !o.cancelled &&
+//         Number(o.expiry) < now &&
+//         !sweptOrders.has(id)
+//       )
+//       .map(({ id }) => id);
 
-    console.log(`📦 Expired (unswept) orders: ${expired.length}`);
+//     console.log(`📦 Expired (unswept) orders: ${expired.length}`);
 
-    // 3️⃣ If none → stop
-    if (expired.length === 0) {
-      console.log("🟢 No new expired orders — skipping swap.");
-      return;
-    }
+//     // 3️⃣ If none → stop
+//     if (expired.length === 0) {
+//       console.log("🟢 No new expired orders — skipping swap.");
+//       return;
+//     }
 
-    // 4️⃣ Batch by 50 and swap
-    const batchSize = 50;
-    for (let i = 0; i < expired.length; i += batchSize) {
-      const batch = expired.slice(i, i + batchSize);
-      const from = batch[0];
-      const to = batch[batch.length - 1];
+//     // 4️⃣ Batch by 50 and swap
+//     const batchSize = 50;
+//     for (let i = 0; i < expired.length; i += batchSize) {
+//       const batch = expired.slice(i, i + batchSize);
+//       const from = batch[0];
+//       const to = batch[batch.length - 1];
 
-      console.log(`🧹 Sweeping expired batch: ${from} → ${to}`);
+//       console.log(`🧹 Sweeping expired batch: ${from} → ${to}`);
 
-      try {
-        const tx = await executor.distributeExpiredOrders(from, to, {
-          gasLimit: 2_000_000
-        });
-        console.log(`⛽ Tx: ${tx.hash}`);
+//       try {
+//         const tx = await executor.distributeExpiredOrders(from, to, {
+//           gasLimit: 2_000_000
+//         });
+//         console.log(`⛽ Tx: ${tx.hash}`);
 
-        await tx.wait();
-        console.log(`   ✅ Sweep completed.`);
+//         await tx.wait();
+//         console.log(`   ✅ Sweep completed.`);
 
-        // 5️⃣ Mark these orders as swept
-        for (const id of batch) sweptOrders.add(id);
+//         // 5️⃣ Mark these orders as swept
+//         for (const id of batch) sweptOrders.add(id);
 
-      } catch (err) {
-        console.log(`   ❌ Sweep failed for ${from}-${to}: ${err.message}`);
-      }
-    }
+//       } catch (err) {
+//         console.log(`   ❌ Sweep failed for ${from}-${to}: ${err.message}`);
+//       }
+//     }
 
-  } catch (err) {
-    console.error("❌ swapExpiredOrders() error:", err.message);
-  }
-}
+//   } catch (err) {
+//     console.error("❌ swapExpiredOrders() error:", err.message);
+//   }
+// }
 
 
 // ===================================================
@@ -277,7 +277,7 @@ async function startswaper(intervalMs = 10_000) {
 
 
 monitorOrders();
-startswaper();
+// startswaper();
 // ===================================================
 // Tiny Express API
 // ===================================================
