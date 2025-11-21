@@ -1,31 +1,51 @@
-// ===================================================
-// 🏦 Minimal Order Monitor + Matching Bot
-// Uses only contract data (no Uniswap SDK / no pool info)
-// ===================================================
+// matcherBot.js
 import { ethers } from "ethers";
-import express from "express";
-import cors from "cors";
-import { createRequire } from "module";
 import dotenv from "dotenv";
 dotenv.config();
-const require = createRequire(import.meta.url);
+import express from "express";
+import cors from "cors";
+import axios from "axios";
+import POOL_ABI from "./ABI/PoolABI.json" with { type: "json" };
+import EXECUTOR_ABI from "./ABI/ABI.json" with { type: "json" };
 
-// ---- CONFIG ----
 const RPC_URL = process.env.RPC_URL || "https://api.skyhighblockchain.com";
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const EXECUTOR_ADDRESS = "0x519c11Bb3e09F89E5393c8F10A26c0D2B9b8d188";
+const EXECUTOR_ADDRESS =
+  process.env.EXECUTOR_ADDRESS || "0x34f92941C90Bba6c72fdD44F636BB3683E3fD2c5";
 
-// ---- ABIs ----
-const EXECUTOR_ABI = require("./ABI/ABI.json");
+if (!PRIVATE_KEY) {
+  console.error("❌ Missing PRIVATE_KEY in .env");
+  process.exit(1);
+}
 
-// ---- SETUP ----
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, EXECUTOR_ABI, wallet);
 
-// ===================================================
-// 🔹 Fetch All Open Orders
-// ===================================================
+// minimal ABI
+
+// cache symbols
+const tokenCache = new Map();
+
+async function getSymbol(addr) {
+  const key = addr.toLowerCase();
+  if (tokenCache.has(key)) return tokenCache.get(key);
+
+  try {
+    const c = new ethers.Contract(addr, ERC20_ABI, provider);
+    const s = await c.symbol();
+    tokenCache.set(key, s);
+    return s;
+  } catch {
+    const fallback = addr.substring(0, 6);
+    tokenCache.set(key, fallback);
+    return fallback;
+  }
+}
+
+/* ----------------------------------------------------------------------
+   FETCH ALL OPEN ORDERS
+------------------------------------------------------------------------ */
 async function fetchOpenOrders() {
   const nextIdBN = await executor.nextOrderId();
   const nextId = Number(nextIdBN ?? 0);
@@ -33,250 +53,165 @@ async function fetchOpenOrders() {
   const tasks = [];
   for (let id = 1; id < nextId; id++) {
     tasks.push(
-      executor
-        .getOrder(id)
-        .then((o) => ({ id, o }))
+      executor.getOrder(id)
+        .then(o => ({ id, o }))
         .catch(() => null)
     );
   }
 
   const results = (await Promise.all(tasks)).filter(Boolean);
   const now = Math.floor(Date.now() / 1000);
+  const open = [];
 
-  return results
-    .map(({ id, o }) => ({
-      id,
-      maker: o.maker,
-      tokenIn: o.tokenIn.toLowerCase(),
-      tokenOut: o.tokenOut.toLowerCase(),
-      pool: o.pool.toLowerCase(),
-      amountIn: BigInt(o.amountIn),
-      expiry: Number(o.expiry),
-      filled: o.filled,
-      cancelled: o.cancelled,
-      orderType: Number(o.orderType),
-      targetSqrtPriceX96: BigInt(o.targetSqrtPriceX96),
-    }))
-    .filter((o) => !o.filled && !o.cancelled && o.expiry > now);
-}
+  for (const { id, o } of results) {
+    if (!o) continue;
 
-// ===================================================
-// 🔹 Simple Pair Key (grouping BUY vs SELL)
-// ===================================================
-function groupKey(a, b, pool) {
-  const [x, y] = [a.toLowerCase(), b.toLowerCase()].sort();
-  return `${x}-${y}-${pool.toLowerCase()}`;
-}
+    // ---- Defensive extraction ----
+    const maker = o.maker || ethers.ZeroAddress;
+    const tokenIn = o.tokenIn ? o.tokenIn.toLowerCase() : ethers.ZeroAddress;
+    const tokenOut = o.tokenOut ? o.tokenOut.toLowerCase() : ethers.ZeroAddress;
+    const pool = o.pool ? o.pool.toLowerCase() : ethers.ZeroAddress;
 
-// ===================================================
-// 🔹 Internal Matching Logic (Binance-style)
-// ===================================================
-const tokenCache = new Map();
+    // numeric conversions, fallback to zero
+    let amountIn, expiry, orderType, filled, cancelled, targetPrice1e18;
 
-async function getTokenSymbol(addr, providerOrSigner) {
-  const provider =
-    providerOrSigner.provider || providerOrSigner; // ensure real provider
+    try { amountIn = BigInt(o.amountIn?.toString() ?? "0"); } catch { amountIn = 0n; }
+    try { expiry = Number(o.expiry?.toString() ?? 0); } catch { expiry = 0; }
+    try { orderType = Number(o.orderType ?? 0); } catch { orderType = 0; }
+    try { filled = Boolean(o.filled); } catch { filled = false; }
+    try { cancelled = Boolean(o.cancelled); } catch { cancelled = false; }
+    try { targetPrice1e18 = BigInt(o.targetPrice1e18?.toString() ?? "0"); } catch { targetPrice1e18 = 0n; }
 
-  const key = addr.toLowerCase();
-  if (tokenCache.has(key)) return tokenCache.get(key);
+    // skip invalid or zero orders
+    if (!maker || maker === ethers.ZeroAddress) continue;
 
-  try {
-    const token = new ethers.Contract(addr, ERC20_ABI, provider);
-    const symbol = await token.symbol();
-    tokenCache.set(key, symbol);
-    return symbol;
-  } catch (err) {
-    console.warn(`⚠️ Failed to fetch symbol for ${addr}: ${err.message}`);
-    const fallback = addr.slice(0, 6);
-    tokenCache.set(key, fallback);
-    return fallback;
+    // FILTER active orders
+    if (!filled && !cancelled && expiry > now) {
+      open.push({
+        id,
+        maker,
+        tokenIn,
+        tokenOut,
+        pool,
+        amountIn,
+        expiry,
+        filled,
+        cancelled,
+        orderType,
+        targetPrice1e18
+      });
+    }
   }
+
+  return open;
 }
 
+/* ----------------------------------------------------------------------
+   Group key
+------------------------------------------------------------------------ */
+function pairKey(a, b) {
+  const [x, y] = [a.toLowerCase(), b.toLowerCase()].sort();
+  return `${x}-${y}`;
+}
+
+/* ----------------------------------------------------------------------
+   SIMPLIFIED MATCHING LOGIC - Just compare buy vs sell prices
+------------------------------------------------------------------------ */
 async function tryInternalMatches() {
-  console.log("\n🔍 Checking for internal matches...");
+  console.log("\n🔍 Checking for matches...");
 
-  const openOrders = await fetchOpenOrders();
-  console.log(`📦 Total open orders: ${openOrders.length}`);
+  const open = await fetchOpenOrders();
+  if (!open.length) {
+    console.log("ℹ️ No open orders.");
+    return;
+  }
 
-  if (openOrders.length === 0) return;
-
-  // Group orders by token pair + pool
+  // group by pair
   const groups = new Map();
-  for (const o of openOrders) {
-    const key = groupKey(o.tokenIn, o.tokenOut, o.pool);
+  for (const o of open) {
+    const key = pairKey(o.tokenIn, o.tokenOut);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(o);
   }
 
+  // loop pairs
   for (const [key, orders] of groups.entries()) {
     if (!orders.length) continue;
 
-    // Fetch token symbols dynamically (once per group)
-    const example = orders[0];
-    const tokenInSym = await getTokenSymbol(example.tokenIn, provider);
-    const tokenOutSym = await getTokenSymbol(example.tokenOut, provider);
+    const sample = orders[0];
+    const tokenA = sample.tokenIn;
+    const tokenB = sample.tokenOut;
+
+    const symA = await getSymbol(tokenA);
+    const symB = await getSymbol(tokenB);
+
+    console.log(`\n📌 Pair ${symA}/${symB}`);
 
     const buys = orders.filter((o) => o.orderType === 0);
     const sells = orders.filter((o) => o.orderType === 1);
-    if (!buys.length || !sells.length) continue;
 
-    console.log(`\n🔹 ${tokenInSym}/${tokenOutSym} [Pool: ${example.pool.slice(0, 8)}...]`);
-    console.log(`   🟢 BUY: ${buys.length} | 🔴 SELL: ${sells.length}`);
+    if (!buys.length || !sells.length) {
+      console.log(`   ℹ️ No matching pair (buys: ${buys.length}, sells: ${sells.length})`);
+      continue;
+    }
 
-    // Sort BUY high→low, SELL low→high
-    buys.sort((a, b) => Number(b.targetSqrtPriceX96) - Number(a.targetSqrtPriceX96));
-    sells.sort((a, b) => Number(a.targetSqrtPriceX96) - Number(b.targetSqrtPriceX96));
+    // buy: highest first
+    buys.sort((a, b) => Number(b.targetPrice1e18 - a.targetPrice1e18));
+    // sell: lowest first
+    sells.sort((a, b) => Number(a.targetPrice1e18 - b.targetPrice1e18));
 
+    // Simple match logic: if buy price >= sell price, execute
     for (const buy of buys) {
       for (const sell of sells) {
-        if (
-          !(buy.tokenIn === sell.tokenOut &&
-            buy.tokenOut === sell.tokenIn &&
-            buy.pool === sell.pool)
-        )
-          continue;
-
-        const buyPrice = parseFloat(ethers.formatUnits(buy.targetSqrtPriceX96, 18)).toFixed(6);
-        const sellPrice = parseFloat(ethers.formatUnits(sell.targetSqrtPriceX96, 18)).toFixed(6);
-
-        console.log(
-          `   🔄 BUY#${buy.id}(${tokenInSym}→${tokenOutSym}, ${buyPrice}) vs SELL#${sell.id}(${tokenOutSym}→${tokenInSym}, ${sellPrice})`
-        );
-
-        if (buyPrice >= sellPrice && sellPrice > 0) {
+        // ONLY condition: buy target price >= sell target price
+        if (buy.targetPrice1e18 >= sell.targetPrice1e18) {
           console.log(
-            `   ✅ Match found! BUY#${buy.id} ≥ SELL#${sell.id} | Price: ${buyPrice} ≥ ${sellPrice}`
+            `   🔄 MATCH! BUY#${buy.id} (${ethers.formatUnits(
+              buy.targetPrice1e18,
+              18
+            )}) >= SELL#${sell.id} (${ethers.formatUnits(
+              sell.targetPrice1e18,
+              18
+            )})`
           );
 
-          const tradeAmount = buy.amountIn < sell.amountIn ? buy.amountIn : sell.amountIn;
-          console.log(`   💰 Trade amount: ${tradeAmount.toString()}`);
-
           try {
-            const tx = await executor.matchOrders(buy.id, sell.id, { gasLimit: 1_000_000 });
+            const tx = await executor.matchOrders(buy.id, sell.id, {
+              gasLimit: 1_500_000
+            });
             console.log(`   ⛽ Tx: ${tx.hash}`);
             const receipt = await tx.wait();
-            console.log(`   ✅ Executed successfully in block ${receipt.blockNumber}`);
+            console.log(`   ✅ Matched in block ${receipt.blockNumber}`);
           } catch (err) {
-            console.log(`   ⚠️ Failed to execute: ${err.message}`);
+            console.log(`   ❌ Match failed: ${err?.message || err}`);
           }
 
-          break; // move to next BUY after successful match
+          break; // move to next buy order
         }
       }
     }
   }
 
-  console.log("\n🏁 Done scanning for matches.\n");
+  console.log("\n🏁 Match cycle complete.\n");
 }
-// ===================================================
-// 🔹 swap Expired Orders (calls distributeExpiredOrders)
-// ===================================================
-const sweptOrders = new Set();
 
-// async function swapExpiredOrders() {
-//   try {
-//     const nextIdBN = await executor.nextOrderId();
-//     const nextId = Number(nextIdBN ?? 0);
-//     const now = Math.floor(Date.now() / 1000);
-
-//     if (nextId <= 1) return;
-
-//     console.log("\n🔎 Checking for expired orders...");
-
-//     // 1️⃣ Collect all orders once
-//     const tasks = [];
-//     for (let id = 1; id < nextId; id++) {
-//       // skip already swept orders
-//       if (sweptOrders.has(id)) continue;
-
-//       tasks.push(
-//         executor.getOrder(id).then(o => ({ id, o })).catch(() => null)
-//       );
-//     }
-
-//     const results = (await Promise.all(tasks)).filter(Boolean);
-
-//     // 2️⃣ Filter expired + not filled + not cancelled + not previously swept
-//     const expired = results
-//       .filter(({ id, o }) =>
-//         !o.filled &&
-//         !o.cancelled &&
-//         Number(o.expiry) < now &&
-//         !sweptOrders.has(id)
-//       )
-//       .map(({ id }) => id);
-
-//     console.log(`📦 Expired (unswept) orders: ${expired.length}`);
-
-//     // 3️⃣ If none → stop
-//     if (expired.length === 0) {
-//       console.log("🟢 No new expired orders — skipping swap.");
-//       return;
-//     }
-
-//     // 4️⃣ Batch by 50 and swap
-//     const batchSize = 50;
-//     for (let i = 0; i < expired.length; i += batchSize) {
-//       const batch = expired.slice(i, i + batchSize);
-//       const from = batch[0];
-//       const to = batch[batch.length - 1];
-
-//       console.log(`🧹 Sweeping expired batch: ${from} → ${to}`);
-
-//       try {
-//         const tx = await executor.distributeExpiredOrders(from, to, {
-//           gasLimit: 2_000_000
-//         });
-//         console.log(`⛽ Tx: ${tx.hash}`);
-
-//         await tx.wait();
-//         console.log(`   ✅ Sweep completed.`);
-
-//         // 5️⃣ Mark these orders as swept
-//         for (const id of batch) sweptOrders.add(id);
-
-//       } catch (err) {
-//         console.log(`   ❌ Sweep failed for ${from}-${to}: ${err.message}`);
-//       }
-//     }
-
-//   } catch (err) {
-//     console.error("❌ swapExpiredOrders() error:", err.message);
-//   }
-// }
-
-
-// ===================================================
-// 🔹 Monitor Loop
-// ===================================================
-async function monitorOrders(intervalMs = 10_000) {
-  console.log("🔎 Order monitor started...");
+/* ----------------------------------------------------------------------
+   LOOP
+------------------------------------------------------------------------ */
+async function start(intervalMs = 10000) {
+  console.log("🟢 Matcher bot started…");
   while (true) {
     try {
       await tryInternalMatches();
     } catch (err) {
-      console.error("🚨 Loop error:", err.message);
+      console.error("⚠️ Loop error:", err);
     }
-    await new Promise((res) => setTimeout(res, intervalMs));
-  }
-}
-async function startswaper(intervalMs = 10_000) {
-  console.log("🧹 Expired order swaper started...");
-
-  while (true) {
-    try {
-      await swapExpiredOrders();
-    } catch (err) {
-      console.log("🔁 swaper loop error:", err.message);
-    }
-
-    await new Promise((res) => setTimeout(res, intervalMs));
+    await new Promise((r) => setTimeout(r, intervalMs));
   }
 }
 
+start();
 
-monitorOrders();
 // startswaper();
 // ===================================================
 // Tiny Express API
@@ -300,7 +235,7 @@ app.get("/order/:id", async (req, res) => {
 // ===================================================
 // 🧠 AMM BOT SECTION
 // ===================================================
-const ERC20_ABI = require("./ABI/IERC20.json").abi;
+// const ERC20_ABI = require("./ABI/IERC20.json").abi;
 
 const TOKENS = {
   USDC: "0x553fE3CA2A5F304857A7c2C78b37686716B8c89b",
