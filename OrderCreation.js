@@ -23,10 +23,12 @@ const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, EXECUTOR_ABI, wallet);
 const FEE = 500;
 
-function encodeSimplePrice(price) {
-    return BigInt(Math.floor(price * 1e18)); // 6 decimals precision
+function encodeSimplePrice(value) {
+    const n = parseFloat(value);
+    if (isNaN(n) || n <= 0) throw new Error("Invalid price");
+    return ethers.parseUnits(n.toString(), 18);
 }
-function randomAmount(min = 0.1, max = 10) {
+function randomAmount(min = 0.1, max = 1) {
     const val = (Math.random() * (max - min) + min).toFixed(4);
     return val.toString();
 }
@@ -61,7 +63,7 @@ async function createOrder({ tokenIn, tokenOut, amountInHuman, priceTarget, orde
 
     const targetSqrtPriceX96 = encodeSimplePrice(
         priceTarget,
-      
+
     );
     const tx = await executor.depositAndCreateOrder(
         tokenIn,
@@ -70,10 +72,9 @@ async function createOrder({ tokenIn, tokenOut, amountInHuman, priceTarget, orde
         amountIn,
         amountOutMin,
         targetSqrtPriceX96,
-        triggerAbove,
         ttlSeconds,
         orderType,
-        { gasLimit: 1_000_000 }
+        { gasLimit: 800000 }
     );
     const receipt = await tx.wait();
     console.log(
@@ -86,11 +87,11 @@ async function main() {
     const orders = [];
 
     // --- SOL/USDT: 50 BUY below 0.9, 50 SELL above 1 ---
-    for (let i = 0; i < 15; i++) {
-        const price = 3130 - i * 0.001; // gradually lower buy prices
+    for (let i = 0; i < 5; i++) {
+        const price = 1 - i * 0.001; // gradually lower buy prices
         orders.push({
             tokenIn: TOKENS.USDT,
-            tokenOut: TOKENS.ETH,
+            tokenOut: TOKENS.USDC,
             amountInHuman: randomAmount(),
             priceTarget: price,
             orderType: 0, // BUY
@@ -98,11 +99,11 @@ async function main() {
             ttlDays: 3,
         });
     }
- 
-    for (let i = 0; i < 15; i++) {
-        const price = 3130 + i * 0.001; // gradually higher sell prices
+
+    for (let i = 0; i < 5; i++) {
+        const price = 1 + i * 0.001; // gradually higher sell prices
         orders.push({
-            tokenIn: TOKENS.ETH,
+            tokenIn: TOKENS.USDC,
             tokenOut: TOKENS.USDT,
             amountInHuman: randomAmount(),
             priceTarget: price,
@@ -111,7 +112,7 @@ async function main() {
             ttlDays: 3,
         });
     }
-   
+
     console.log(`\n📦 Creating ${orders.length} random orders...`);
     for (const [i, order] of orders.entries()) {
         try {

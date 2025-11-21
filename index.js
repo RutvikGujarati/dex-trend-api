@@ -10,8 +10,7 @@ import EXECUTOR_ABI from "./ABI/ABI.json" with { type: "json" };
 
 const RPC_URL = process.env.RPC_URL || "https://api.skyhighblockchain.com";
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const EXECUTOR_ADDRESS =
-  process.env.EXECUTOR_ADDRESS || "0x34f92941C90Bba6c72fdD44F636BB3683E3fD2c5";
+const EXECUTOR_ADDRESS ="0x55035f617222d3393a44bB3C8735b6122EEde800";
 
 if (!PRIVATE_KEY) {
   console.error("❌ Missing PRIVATE_KEY in .env");
