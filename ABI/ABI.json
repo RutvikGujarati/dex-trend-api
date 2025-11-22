@@ -25,11 +25,6 @@
 				"type": "address"
 			},
 			{
-				"internalType": "address",
-				"name": "pool",
-				"type": "address"
-			},
-			{
 				"internalType": "uint256",
 				"name": "amountIn",
 				"type": "uint256"
@@ -243,19 +238,9 @@
 				"internalType": "address",
 				"name": "token",
 				"type": "address"
-			},
-			{
-				"internalType": "address",
-				"name": "to",
-				"type": "address"
-			},
-			{
-				"internalType": "uint256",
-				"name": "amount",
-				"type": "uint256"
 			}
 		],
-		"name": "ownerWithdraw",
+		"name": "ownerWithdrawLeftover",
 		"outputs": [],
 		"stateMutability": "nonpayable",
 		"type": "function"
@@ -264,7 +249,7 @@
 		"inputs": [
 			{
 				"internalType": "address",
-				"name": "_new",
+				"name": "newOwner",
 				"type": "address"
 			}
 		],
@@ -277,101 +262,36 @@
 		"inputs": [
 			{
 				"internalType": "address",
-				"name": "token",
+				"name": "tokenA",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "tokenB",
 				"type": "address"
 			}
 		],
-		"name": "withdrawRefund",
-		"outputs": [],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	},
-	{
-		"inputs": [
+		"name": "getLastExecutedPrice",
+		"outputs": [
 			{
 				"internalType": "uint256",
-				"name": "startId",
+				"name": "price1e18",
 				"type": "uint256"
 			},
 			{
 				"internalType": "uint256",
-				"name": "count",
+				"name": "blockNum",
 				"type": "uint256"
-			}
-		],
-		"name": "getAllOrders",
-		"outputs": [
+			},
 			{
-				"components": [
-					{
-						"internalType": "address",
-						"name": "maker",
-						"type": "address"
-					},
-					{
-						"internalType": "address",
-						"name": "tokenIn",
-						"type": "address"
-					},
-					{
-						"internalType": "address",
-						"name": "tokenOut",
-						"type": "address"
-					},
-					{
-						"internalType": "address",
-						"name": "pool",
-						"type": "address"
-					},
-					{
-						"internalType": "uint256",
-						"name": "amountIn",
-						"type": "uint256"
-					},
-					{
-						"internalType": "uint256",
-						"name": "amountOutMin",
-						"type": "uint256"
-					},
-					{
-						"internalType": "uint256",
-						"name": "originalAmountIn",
-						"type": "uint256"
-					},
-					{
-						"internalType": "uint256",
-						"name": "targetPrice1e18",
-						"type": "uint256"
-					},
-					{
-						"internalType": "uint256",
-						"name": "expiry",
-						"type": "uint256"
-					},
-					{
-						"internalType": "bool",
-						"name": "filled",
-						"type": "bool"
-					},
-					{
-						"internalType": "bool",
-						"name": "cancelled",
-						"type": "bool"
-					},
-					{
-						"internalType": "bool",
-						"name": "claimed",
-						"type": "bool"
-					},
-					{
-						"internalType": "enum LimitOrderExecutorSimple.OrderType",
-						"name": "orderType",
-						"type": "uint8"
-					}
-				],
-				"internalType": "struct LimitOrderExecutorSimple.Order[]",
-				"name": "",
-				"type": "tuple[]"
+				"internalType": "uint256",
+				"name": "buyOrderId",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "sellOrderId",
+				"type": "uint256"
 			}
 		],
 		"stateMutability": "view",
@@ -402,11 +322,6 @@
 					{
 						"internalType": "address",
 						"name": "tokenOut",
-						"type": "address"
-					},
-					{
-						"internalType": "address",
-						"name": "pool",
 						"type": "address"
 					},
 					{
@@ -464,6 +379,45 @@
 		"type": "function"
 	},
 	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"name": "lastExecutedPrice",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "price1e18",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "blockNum",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "buyOrderId",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "sellOrderId",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
 		"inputs": [],
 		"name": "nextOrderId",
 		"outputs": [
@@ -495,14 +449,9 @@
 				"internalType": "address",
 				"name": "",
 				"type": "address"
-			},
-			{
-				"internalType": "address",
-				"name": "",
-				"type": "address"
 			}
 		],
-		"name": "refundable",
+		"name": "systemLeftover",
 		"outputs": [
 			{
 				"internalType": "uint256",

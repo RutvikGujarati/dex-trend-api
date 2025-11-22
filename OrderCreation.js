@@ -1,31 +1,32 @@
+// orderBatcher.js
 import { ethers } from "ethers";
 import dotenv from "dotenv";
 import { createRequire } from "module";
-import { TOKENS } from "./constants.js";
+import { TOKENS } from "./constants.js"; // ensure this exports token addresses
 const require = createRequire(import.meta.url);
 dotenv.config();
 
 // ===== ABIs =====
 const ERC20_ABI = require("./ABI/IERC20.json").abi;
 const EXECUTOR_ABI = require("./ABI/LimitOrder.json");
-const FACTORY_ABI = ["function getPool(address,address,uint24) view returns(address)"];
 
-// ===== ENV CONFIG =====
-const { RPC_URL, PRIVATE_KEY, FACTORY_ADDRESS, EXECUTOR_ADDRESS } = process.env;
-if (!RPC_URL || !PRIVATE_KEY || !FACTORY_ADDRESS || !EXECUTOR_ADDRESS)
-    throw new Error("Missing .env vars (RPC_URL, PRIVATE_KEY, FACTORY_ADDRESS, EXECUTOR_ADDRESS)");
+// ===== ENV CONFIG (set these in your .env) =====
+const { RPC_URL, PRIVATE_KEY, EXECUTOR_ADDRESS } = process.env;
+if (!RPC_URL || !PRIVATE_KEY || !EXECUTOR_ADDRESS)
+    throw new Error("Missing .env vars (RPC_URL, PRIVATE_KEY, EXECUTOR_ADDRESS)");
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 console.log("💼 Wallet address:", wallet.address);
 
-const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, EXECUTOR_ABI, wallet);
-const FEE = 500;
+const ZERO = ethers.ZeroAddress;
 
+// ===== Utilities =====
 function encodeSimplePrice(value) {
     const n = parseFloat(value);
     if (isNaN(n) || n <= 0) throw new Error("Invalid price");
+    // price scaled to 1e18
     return ethers.parseUnits(n.toString(), 18);
 }
 function randomAmount(min = 0.1, max = 1) {
@@ -33,146 +34,185 @@ function randomAmount(min = 0.1, max = 1) {
     return val.toString();
 }
 
-async function approve(token, spender, amount = ethers.MaxUint256) {
-    const c = new ethers.Contract(token, ERC20_ABI, wallet);
-    const allowed = await c.allowance(wallet.address, spender);
-    if (allowed < amount) {
-        console.log(`Approving ${token.slice(0, 8)}...`);
-        const tx = await c.approve(spender, amount);
-        await tx.wait();
-        console.log("✓ Approved");
-    }
-}
-
 async function getDecimals(token) {
     const c = new ethers.Contract(token, ERC20_ABI, provider);
     return Number(await c.decimals());
 }
 
-// ===== CREATE ORDER =====
-async function createOrder({ tokenIn, tokenOut, amountInHuman, priceTarget, orderType, triggerAbove, ttlDays }) {
-    const decimals = await getDecimals(tokenIn);
-    const amountIn = ethers.parseUnits(amountInHuman.toString(), decimals);
-    const amountOutMin = amountIn / 100n;
-    const ttlSeconds = ttlDays * 24 * 60 * 60;
+async function approveIfNeeded(token, spender, requiredAmount) {
+    const c = new ethers.Contract(token, ERC20_ABI, wallet);
+    const allowed = await c.allowance(wallet.address, spender);
+    // allowed and requiredAmount are BigInt
+    if (allowed < requiredAmount) {
+        console.log(`Approving ${token.slice(0, 8)} for ${spender}...`);
+        const tx = await c.approve(spender, ethers.MaxUint256);
+        await tx.wait();
+        console.log("✓ Approved");
+    }
+}
 
-    const pool = await factory.getPool(tokenIn, tokenOut, FEE);
-    if (pool === ethers.ZeroAddress) throw new Error("Pool not found");
+/**
+ * Create order using simple CEX-style semantics:
+ * - BUY: user pays (price * amount) of quoteToken (tokenIn) and expects `amount` base token (tokenOut)
+ * - SELL: user pays `amount` of baseToken (tokenIn) and expects (price * amount) quote token (tokenOut)
+ *
+ * Params:
+ *  - tokenIn, tokenOut: addresses
+ *  - amountHuman: amount in human units (base units for SELL, base units for BUY receive)
+ *  - priceTarget: price (quote per base), numeric or string
+ *  - orderType: 0 = BUY, 1 = SELL
+ *  - ttlDays: integer
+ */
+async function createOrder({ tokenIn, tokenOut, amountHuman, priceTarget, orderType, ttlDays = 3 }) {
+    // Determine decimals for tokenIn and tokenOut
+    const decimalsIn = await getDecimals(tokenIn);
+    const decimalsOut = await getDecimals(tokenOut);
 
-    await approve(tokenIn, EXECUTOR_ADDRESS, amountIn);
+    // Parse numeric inputs
+    const priceNum = parseFloat(String(priceTarget));
+    const amountNum = parseFloat(String(amountHuman));
+    if (isNaN(priceNum) || isNaN(amountNum) || priceNum <= 0 || amountNum <= 0) {
+        throw new Error("Invalid price or amount");
+    }
 
-    const targetSqrtPriceX96 = encodeSimplePrice(
-        priceTarget,
+    // For BUY: deposit = price * amount (in tokenIn decimals)
+    // For SELL: deposit = amount (in tokenIn decimals)
+    let amountIn;       // BigInt, in tokenIn smallest units
+    let amountOutMin;   // BigInt, in tokenOut smallest units (we set reasonable min)
+    if (orderType === 0) {
+        // BUY
+        // amountInHuman (what user pays in quote) = price * amount
+        const depositHuman = priceNum * amountNum;
+        amountIn = ethers.parseUnits(depositHuman.toString(), decimalsIn); // tokenIn is quote token
+        // amountOutMin: minimum base token expected (we accept exact amount * 0.99 slippage)
+        const amountOutHuman = amountNum * 0.99; // 1% slippage tolerance
+        amountOutMin = ethers.parseUnits(amountOutHuman.toString(), decimalsOut);
+    } else {
+        // SELL
+        // deposit = amountNum (base units)
+        amountIn = ethers.parseUnits(amountNum.toString(), decimalsIn); // tokenIn is base token
+        // amountOutMin: minimum quote token expected
+        const outHuman = priceNum * amountNum * 0.99; // 1% slippage tolerance
+        amountOutMin = ethers.parseUnits(outHuman.toString(), decimalsOut);
+    }
 
-    );
+    const ttlSeconds = Math.floor(ttlDays * 24 * 60 * 60);
+
+    // Approve tokenIn if needed
+    await approveIfNeeded(tokenIn, EXECUTOR_ADDRESS, amountIn);
+
+    // Construct target price scaled to 1e18 (uint256)
+    const targetPrice1e18 = encodeSimplePrice(priceNum);
+
+    // Use ZERO pool
+    const pool = ZERO;
+
+    // Call contract — ethers v6 requires overrides as last param (gasLimit bigint)
     const tx = await executor.depositAndCreateOrder(
         tokenIn,
         tokenOut,
         pool,
         amountIn,
         amountOutMin,
-        targetSqrtPriceX96,
+        targetPrice1e18,
         ttlSeconds,
         orderType,
-        { gasLimit: 800000 }
+        { gasLimit: 800000n } // must be bigint
     );
+
     const receipt = await tx.wait();
-    console.log(
-        `✅ ${orderType === 0 ? "BUY" : "SELL"} ${tokenIn.slice(0, 8)} @ ${priceTarget} | amount=${amountInHuman} | tx=${receipt.hash}`
-    );
+    return { txHash: receipt.transactionHash, blockNumber: receipt.blockNumber };
 }
 
-// ===== MAIN =====
+// ===== MAIN: create a batch of test orders =====
 async function main() {
     const orders = [];
 
-    // --- SOL/USDT: 50 BUY below 0.9, 50 SELL above 1 ---
+    // Create some BUY orders: tokenIn = USDT (quote), tokenOut = USDC (base)
     for (let i = 0; i < 5; i++) {
-        const price = 1 - i * 0.001; // gradually lower buy prices
+        const price = 0.14 - i * 0.001; // 1.000, 0.999, 0.998...
         orders.push({
             tokenIn: TOKENS.USDT,
-            tokenOut: TOKENS.USDC,
-            amountInHuman: randomAmount(),
+            tokenOut: TOKENS.MATIC,
+            amountHuman: randomAmount(), // base amount they want to receive
             priceTarget: price,
             orderType: 0, // BUY
-            triggerAbove: false,
-            ttlDays: 3,
+            ttlDays: 3
         });
     }
 
+    // Create some SELL orders: 
     for (let i = 0; i < 5; i++) {
-        const price = 1 + i * 0.001; // gradually higher sell prices
+        const price = 0.14 + i * 0.001;
         orders.push({
-            tokenIn: TOKENS.USDC,
+            tokenIn: TOKENS.MATIC,
             tokenOut: TOKENS.USDT,
-            amountInHuman: randomAmount(),
+            amountHuman: randomAmount(),
             priceTarget: price,
             orderType: 1, // SELL
-            triggerAbove: true,
-            ttlDays: 3,
+            ttlDays: 3
         });
     }
 
-    console.log(`\n📦 Creating ${orders.length} random orders...`);
-    for (const [i, order] of orders.entries()) {
+    console.log(`\n📦 Creating ${orders.length} orders...`);
+
+    for (const [i, ord] of orders.entries()) {
         try {
-            console.log(
-                `\n#${i + 1} → ${order.orderType === 0 ? "BUY" : "SELL"} @ ${order.priceTarget} | amount=${order.amountInHuman}`
-            );
-            await createOrder(order);
+            console.log(`\n#${i + 1} → ${ord.orderType === 0 ? "BUY" : "SELL"} @ ${ord.priceTarget} | amount=${ord.amountHuman}`);
+            const res = await createOrder(ord);
+            console.log(`   ✅ Tx: ${res.txHash} (block ${res.blockNumber})`);
         } catch (err) {
-            console.error(`❌ Failed order #${i + 1}: ${err.message}`);
+            console.error(`   ❌ Failed order #${i + 1}:`, err?.message ?? err);
         }
     }
 
-    console.log("\n✅ All random batch orders submitted.");
+    console.log("\n✅ Batch done.");
 }
-// ===== CANCEL BUY ORDERS FOR BNB =====
-async function cancelAllBNBBuyOrders() {
-    console.log("\n🔍 Searching for all BNB BUY orders...");
 
-    // Fetch all OrderCreated events (adjust the block range if needed)
+// Optional helper: cancel all buy orders for a token created by this wallet
+async function cancelAllBuyOrdersForToken(targetTokenIn) {
+    console.log("🔍 scanning OrderCreated events for our buys...");
     const filter = executor.filters.OrderCreated();
+    // queryFilter over entire chain may be slow — adjust range if needed
     const logs = await executor.queryFilter(filter, 0, "latest");
+    const myAddr = wallet.address.toLowerCase();
 
-    const walletAddr = wallet.address;
-    const bnbAddr = TOKENS.BNB; // you must define TOKENS.BNB address
+    const buyOrderIds = [];
+    for (const ev of logs) {
+        const args = ev.args || {};
+        // Event fields may be named differently — check your ABI event arg names
+        const maker = String(args.maker).toLowerCase();
+        const tokenIn = String(args.tokenIn).toLowerCase();
+        const id = args.id ?? args.orderId ?? args._orderId ?? args[0]; // try multiple names
 
-    const buyOrders = [];
-
-    for (const log of logs) {
-        const { orderId, maker, orderType, tokenIn } = log.args;
-
-        if (
-            maker === walletAddr &&
-            tokenIn === bnbAddr &&
-            orderType === 0 // BUY
-        ) {
-            buyOrders.push(orderId);
+        if (maker === myAddr && tokenIn === targetTokenIn.toLowerCase()) {
+            // Determine orderType; event may contain it in args
+            if (Number(args.orderType ?? args[6] ?? 0) === 0) {
+                buyOrderIds.push(Number(id.toString ? id.toString() : id));
+            }
         }
     }
 
-    if (buyOrders.length === 0) {
-        console.log("⚠ No BNB BUY orders found.");
-        return;
-    }
+    console.log(`Found ${buyOrderIds.length} buy orders to cancel.`);
 
-    console.log(`🧾 Found ${buyOrders.length} BUY orders for BNB.`);
-
-    // Cancel each one
-    for (const id of buyOrders) {
+    for (const id of buyOrderIds) {
         try {
-            console.log(`🚫 Cancelling order ID ${id.toString()}...`);
-            const tx = await executor.cancelOrder(id, { gasLimit: 200000 });
+            const tx = await executor.cancelOrder(id, { gasLimit: 200000n });
             await tx.wait();
-            console.log(`✅ Cancelled order #${id.toString()}`);
+            console.log(`Cancelled #${id}`);
         } catch (err) {
-            console.error(`❌ Failed to cancel #${id.toString()}: ${err.message}`);
+            console.error(`Failed cancelling #${id}:`, err?.message ?? err);
         }
     }
-
-    console.log("🏁 All BNB BUY orders cancelled.");
 }
 
-// cancelAllBNBBuyOrders();
-main();
+// Run main when script executed
+if (process.argv.includes("--cancel-bnb-buys")) {
+    // example usage: node orderBatcher.js --cancel-bnb-buys
+    cancelAllBuyOrdersForToken(TOKENS.BNB).catch((e) => console.error(e));
+} else {
+    main().catch((e) => {
+        console.error(e);
+        process.exit(1);
+    });
+}
