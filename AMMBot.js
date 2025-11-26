@@ -11,7 +11,9 @@ const EXECUTOR_ABI = require("./ABI/LimitOrder.json");
 const ERC20_ABI = require("./ABI/IERC20.json").abi;
 const ROUTER_ABI = require("./ABI/RouterABI.json").abi;
 
-const { RPC_URL, PRIVATE_KEY, EXECUTOR_ADDRESS, UNISWAP_ROUTER } = process.env;
+const { RPC_URL, PRIVATE_KEY } = process.env;
+const EXECUTOR_ADDRESS = "0x14e904F5FfA5748813859879f8cA20e487F407D8"
+const UNISWAP_ROUTER = "0x459A438Fbe3Cb71f2F8e251F181576d5a035Faef"
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
