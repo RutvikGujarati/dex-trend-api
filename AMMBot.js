@@ -1,330 +1,303 @@
 import { ethers } from "ethers";
 import dotenv from "dotenv";
-import { NonceManager } from "ethers";
 import axios from "axios";
 import { createRequire } from "module";
-import { COINGECKO_IDS, POOL_MAP, TOKENS } from "./constants.js";
+import { TOKENS, COINGECKO_IDS } from "./constants.js";
 
 dotenv.config();
 const require = createRequire(import.meta.url);
 
-const POOL_ABI = require("./ABI/PoolABI.json").abi;
+const EXECUTOR_ABI = require("./ABI/LimitOrder.json");
 const ERC20_ABI = require("./ABI/IERC20.json").abi;
-const SWAP_ROUTER_ABI = require("./ABI/RouterABI.json").abi;
-const FACTORY_ABI = ["function getPool(address,address,uint24) view returns(address)"];
+const ROUTER_ABI = require("./ABI/RouterABI.json").abi;
 
-const { RPC_URL, PRIVATE_KEY, FACTORY_ADDRESS, SWAP_ROUTER_ADDRESS } = process.env;
-if (!RPC_URL || !PRIVATE_KEY || !FACTORY_ADDRESS || !SWAP_ROUTER_ADDRESS) {
-    throw new Error("Missing env vars");
-}
+const { RPC_URL, PRIVATE_KEY, EXECUTOR_ADDRESS, UNISWAP_ROUTER } = process.env;
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
-const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
-const walletNM = new NonceManager(wallet);
-const swapRouter = new ethers.Contract(SWAP_ROUTER_ADDRESS, SWAP_ROUTER_ABI, walletNM);
-const FEE = 500; // 0.05%
+const executor = new ethers.Contract(EXECUTOR_ADDRESS, EXECUTOR_ABI, wallet);
+const router = new ethers.Contract(UNISWAP_ROUTER, ROUTER_ABI, wallet);
 
-// =============== UTIL FUNCTIONS ===============
+async function getDecimals(t) {
+    return Number(await new ethers.Contract(t, ERC20_ABI, provider).decimals());
+}
 
-async function approve(token, spender, amount = ethers.MaxUint256) {
+async function balanceOf(t) {
+    return await new ethers.Contract(t, ERC20_ABI, provider).balanceOf(wallet.address);
+}
+
+async function approveIfNeeded(token, spender, amt) {
     const c = new ethers.Contract(token, ERC20_ABI, wallet);
-    const allowed = await c.allowance(wallet.address, spender);
-    if (allowed < amount) {
-        console.log(`  ✓ Approving ${token.slice(0, 8)}...`);
-        await (await c.approve(spender, amount)).wait();
+    const allowance = await c.allowance(wallet.address, spender);
+    if (allowance < amt) {
+        console.log(`Approving ${token}...`);
+        const tx = await c.approve(spender, ethers.MaxUint256);
+        await tx.wait();
     }
 }
-function getMinimalAmount(decimals) {
-    return 0.01; // 0.01 smallest fraction
+
+function safeNum(v) {
+    if (!v || isNaN(v) || !isFinite(v)) return null;
+    return Number(v);
 }
 
-
-async function getBalance(token) {
-    const c = new ethers.Contract(token, ERC20_ABI, provider);
-    return c.balanceOf(wallet.address);
+function encodePrice(p) {
+    return ethers.parseUnits(p.toFixed(4), 18);
 }
 
-async function getTokenInfo(token) {
-    const c = new ethers.Contract(token, ERC20_ABI, provider);
-    const [decimals, symbol] = await Promise.all([c.decimals(), c.symbol()]);
-    return { decimals: Number(decimals), symbol };
-}
+async function swapFor(tokenNeeded, amountNeeded) {
+    const usdt = TOKENS.USDT;
+    const bal = await balanceOf(usdt);
 
-async function getPoolData(tA, tB) {
-    const symA = Object.keys(TOKENS).find(k => TOKENS[k].toLowerCase() === tA.toLowerCase());
-    const symB = Object.keys(TOKENS).find(k => TOKENS[k].toLowerCase() === tB.toLowerCase());
-
-    // 🔥 Special handling for USDC/USDT
-    if ((symA === "USDC" && symB === "USDT") || (symA === "USDT" && symB === "USDC")) {
-
-        const poolAddress = POOL_MAP["USDC_USDT"];
-        console.log(`  ↪ Using fixed pool address for USDC/USDT: ${poolAddress}`);
-
-        const pool = new ethers.Contract(poolAddress, POOL_ABI, provider);
-        const [p0, p1, slot0, liquidityBN] = await Promise.all([
-            pool.token0(),
-            pool.token1(),
-            pool.slot0(),
-            pool.liquidity()
-        ]);
-
-        const sqrtPriceX96 = BigInt(slot0[0].toString());
-        const sqrtPrice = Number(sqrtPriceX96) / 2 ** 96;
-        const price = sqrtPrice ** 2;
-
-        return {
-            poolAddress,
-            token0: p0,
-            token1: p1,
-            price,
-            sqrtPrice,
-            liquidity: Number(liquidityBN),
-        };
+    if (bal < amountNeeded) {
+        console.log("Not enough USDT to swap");
+        return false;
     }
 
-    // 🔥 Default logic for all other tokens
-    const [token0, token1] =
-        tA.toLowerCase() < tB.toLowerCase() ? [tA, tB] : [tB, tA];
+    console.log(`Swapping USDT → ${tokenNeeded} amount=${ethers.formatUnits(amountNeeded, 6)}`);
 
-    const addr = await factory.getPool(token0, token1, FEE);
-    if (addr === ethers.ZeroAddress) return null;
+    await approveIfNeeded(usdt, UNISWAP_ROUTER, amountNeeded);
 
-    const pool = new ethers.Contract(addr, POOL_ABI, provider);
-    const [p0, p1, slot0, liquidityBN] = await Promise.all([
-        pool.token0(),
-        pool.token1(),
-        pool.slot0(),
-        pool.liquidity()
-    ]);
-
-    const sqrtPriceX96 = BigInt(slot0[0].toString());
-    const sqrtPrice = Number(sqrtPriceX96) / 2 ** 96;
-    const price = sqrtPrice ** 2;
-
-    return {
-        poolAddress: addr,
-        token0: p0,
-        token1: p1,
-        price,
-        sqrtPrice,
-        liquidity: Number(liquidityBN)
-    };
-}
-
-// =============== MARKET PRICE FETCHER ===============
-
-async function getMarketPrices() {
     try {
-        // Build CoinGecko query from token list
-        const ids = Object.keys(TOKENS)
-            .map(sym => COINGECKO_IDS[sym])
-            .filter(Boolean)  // remove undefined
-            .join(",");
+        const tx = await router.exactInputSingle({
+            tokenIn: usdt,
+            tokenOut: tokenNeeded,
+            fee: 500,
+            recipient: wallet.address,
+            deadline: Math.floor(Date.now() / 1000) + 900,
+            amountIn: amountNeeded,
+            amountOutMinimum: 0,
+            sqrtPriceLimitX96: 0
+        }, { gasLimit: 500000 });
 
-        const res = await axios.get(
-            `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`
+        await tx.wait();
+        console.log("Swap completed successfully");
+        return true;
+    } catch (e) {
+        console.log("Swap failed:", e.message);
+        return false;
+    }
+}
+
+async function ensureBalance(token, requiredAmount) {
+    const bal = await balanceOf(token);
+    
+    if (bal >= requiredAmount) {
+        console.log(`Sufficient balance: ${ethers.formatUnits(bal, await getDecimals(token))}`);
+        return true;
+    }
+
+    const shortage = requiredAmount - bal;
+    console.log(`Balance low. Need: ${ethers.formatUnits(requiredAmount, await getDecimals(token))}, Have: ${ethers.formatUnits(bal, await getDecimals(token))}`);
+    
+    // If token is not USDT, swap USDT for it
+    if (token !== TOKENS.USDT) {
+        // Estimate USDT needed (add 10% buffer for slippage)
+        const usdtNeeded = shortage * 110n / 100n;
+        return await swapFor(token, usdtNeeded);
+    }
+    
+    console.log("Insufficient USDT balance");
+    return false;
+}
+
+async function createOrder({ tokenIn, tokenOut, amountIn, amountOutMin, price, orderType }) {
+    console.log(`Creating ${orderType === 0 ? 'BUY' : 'SELL'} order at price=${price}`);
+
+    // Ensure we have enough balance, swap if needed
+    const hasBalance = await ensureBalance(tokenIn, amountIn);
+    if (!hasBalance) {
+        console.log("Failed to ensure sufficient balance");
+        return null;
+    }
+
+    await approveIfNeeded(tokenIn, EXECUTOR_ADDRESS, amountIn);
+
+    const ttl = 3 * 86400;
+    const p1e18 = encodePrice(price);
+    const nextId = Number(await executor.nextOrderId());
+
+    try {
+        const tx = await executor.depositAndCreateOrder(
+            tokenIn,
+            tokenOut,
+            amountIn,
+            amountOutMin,
+            p1e18,
+            ttl,
+            orderType,
+            { gasLimit: 700000 }
         );
 
-        const data = res.data;
-
-        const prices = {};
-
-        for (const [symbol, id] of Object.entries(COINGECKO_IDS)) {
-            if (data[id] && data[id].usd) {
-                prices[symbol] = data[id].usd;
-            }
-        }
-
-        return prices;
-
-    } catch (err) {
-        console.error("⚠ Failed to fetch market prices", err.message);
+        const rc = await tx.wait();
+        console.log(`Order ${nextId} created at tx: ${rc.transactionHash}`);
+        return nextId;
+    } catch (e) {
+        console.log(`Order creation failed: ${e.message}`);
         return null;
     }
 }
 
-
-// =============== PRICE CALCULATION LOGIC ===============
-
-function getSwapAmount(pd, tA, targetPrice) {
-    const poolToken0 = pd.token0.toLowerCase();
-    const tA_l = tA.toLowerCase();
-    const targetPricePool = poolToken0 === tA_l ? targetPrice : 1 / targetPrice;
-
-    const s = pd.sqrtPrice;
-    const sTarget = Math.sqrt(targetPricePool);
-    const L = pd.liquidity;
-    if (!isFinite(s) || !isFinite(sTarget) || !isFinite(L) || L <= 0) return null;
-
-    const needToken1 = sTarget > s;
-    const tokenIn = needToken1 ? pd.token1 : pd.token0;
-    const tokenOut = needToken1 ? pd.token0 : pd.token1;
-
-    // Full theoretical amount
-    let amount = needToken1 ? L * (sTarget - s) : L * (1 / sTarget - 1 / s);
-    if (amount <= 0) return null;
-
-    const scaleFactor = 1e-18;
-
-    // ✅ Apply a gradual step (e.g., 20% of full amount)
-    const STEP = 0.0001; // 20% of full swap
-    amount = amount * STEP;
-
-    return { tokenIn, tokenOut, amount: amount * scaleFactor };
-}
-
-
-// =============== SWAP ===============
-
-async function swap(tIn, tOut, amt, dec) {
-    const amountIn = ethers.parseUnits(amt.toFixed(dec), dec);
-    const balance = await getBalance(tIn);
-    if (balance < amountIn) {
-        console.log(`  ⚠ Not enough balance for ${tIn.slice(0, 8)}`);
-        return false;
-    }
-    await approve(tIn, SWAP_ROUTER_ADDRESS, amountIn);
-
-    const params = [
-        tIn,
-        tOut,
-        FEE,
-        wallet.address,
-        Math.floor(Date.now() / 1000) + 600,
-        amountIn,
-        0,
-        0
-    ];
+async function matchOrders(buyId, sellId) {
+    console.log(`Matching BUY ${buyId} + SELL ${sellId}`);
 
     try {
-        const nonce = await provider.getTransactionCount(wallet.address, "latest");
-        const tx = await swapRouter.exactInputSingle(params, {
-            gasLimit: 500000,
-            nonce
-        }); await tx.wait();
-        console.log(`  ✓ Swap successful`);
+        const tx = await executor.matchOrders(buyId, sellId, { gasLimit: 700000 });
+        const rc = await tx.wait();
+        console.log("Match success:", rc.transactionHash);
         return true;
-    } catch (err) {
-        console.error(`  ✗ Swap failed: ${err.message}`);
+    } catch (e) {
+        console.log("Match failed:", e.message);
         return false;
     }
 }
 
-// =============== REBALANCING LOGIC ===============
-function estimateOutput(amountIn, pd, tokenIn, tokenOut) {
-    // Approximation for small swaps using price
-    const poolPrice = pd.token0.toLowerCase() === tokenIn.toLowerCase()
-        ? pd.price
-        : 1 / pd.price;
+async function getOnchainPrice(a, b) {
+    try {
+        const [p] = await executor.getLastExecutedPrice(a, b);
+        if (p > 0) return Number(ethers.formatUnits(p, 18));
+        return null;
+    } catch {
+        return null;
+    }
+}
 
-    if (tokenIn.toLowerCase() === pd.token0.toLowerCase()) {
-        // token0 -> token1
-        return amountIn * poolPrice;
+async function getMarketPrices() {
+    try {
+        const ids = Object.values(COINGECKO_IDS).join(",");
+        const r = await axios.get(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`);
+
+        const out = {};
+        for (const [sym, id] of Object.entries(COINGECKO_IDS)) {
+            const price = r.data[id]?.usd;
+            out[sym] = safeNum(price);
+        }
+
+        console.log("Market prices:", out);
+        return out;
+
+    } catch (e) {
+        console.log("Price fetch error:", e.message);
+        return null;
+    }
+}
+
+async function adjustPrice(symbol, tokenA, market) {
+    const USDT = TOKENS.USDT;
+
+    const real = safeNum(market[symbol] / market["USDT"]);
+    if (!real) {
+        console.log("Real price invalid for", symbol);
+        return;
+    }
+
+    let ob = await getOnchainPrice(tokenA, USDT);
+    if (!ob) ob = real;
+
+    console.log(`\n=== ${symbol} ===`);
+    console.log("Real:", real, "OB:", ob);
+
+    const deviation = Math.abs(real - ob) / ob;
+    const MAX_DEV = 0.01; // 1%
+
+    if (deviation < MAX_DEV) {
+        console.log("Price within range, skipping");
+        return;
+    }
+
+    console.log(`Deviation: ${(deviation * 100).toFixed(2)}% - Adjusting...`);
+
+    const execPrice = safeNum(Number(real.toFixed(4)));
+    if (!execPrice) {
+        console.log("Exec price invalid");
+        return;
+    }
+
+    // Use meaningful token amounts (0.01 tokens instead of 0.00001)
+    const tradeAmount = 0.01;
+    const decA = await getDecimals(tokenA);
+    const decU = await getDecimals(USDT);
+
+    // Calculate amounts that will match exactly
+    const sellAmount = ethers.parseUnits(tradeAmount.toFixed(6), decA);
+    const buyAmount = ethers.parseUnits((execPrice * tradeAmount).toFixed(6), decU);
+    
+    // Set minimum outputs to 99% to allow for small rounding
+    const minOutA = sellAmount * 99n / 100n;
+    const minOutU = buyAmount * 99n / 100n;
+
+    console.log(`Trade Amount: ${tradeAmount} ${symbol}`);
+    console.log(`USDT Amount: ${(execPrice * tradeAmount).toFixed(6)} USDT`);
+
+    // Create BUY order (USDT -> Token)
+    console.log("Creating BUY order...");
+    const buyId = await createOrder({
+        tokenIn: USDT,
+        tokenOut: tokenA,
+        amountIn: buyAmount,
+        amountOutMin: minOutA,
+        price: execPrice,
+        orderType: 0
+    });
+
+    if (!buyId && buyId !== 0) {
+        console.log("BUY order creation failed");
+        return;
+    }
+
+    // Create SELL order (Token -> USDT)
+    console.log("Creating SELL order...");
+    const sellId = await createOrder({
+        tokenIn: tokenA,
+        tokenOut: USDT,
+        amountIn: sellAmount,
+        amountOutMin: minOutU,
+        price: execPrice,
+        orderType: 1
+    });
+
+    if (!sellId && sellId !== 0) {
+        console.log("SELL order creation failed");
+        return;
+    }
+
+    // Match the orders
+    const matched = await matchOrders(buyId, sellId);
+    
+    if (matched) {
+        const newP = await getOnchainPrice(tokenA, USDT);
+        console.log("Updated Onchain Price:", newP);
+        console.log(`Price adjustment successful!`);
     } else {
-        // token1 -> token0
-        return amountIn / poolPrice;
+        console.log("Price adjustment failed - orders did not match");
     }
 }
-
-async function rebalance(tA, tB, marketPrice) {
-    const [infoA, infoB] = await Promise.all([getTokenInfo(tA), getTokenInfo(tB)]);
-    console.log(`\n📊 Checking ${infoA.symbol}/${infoB.symbol}`);
-
-    const pd = await getPoolData(tA, tB);
-    if (!pd) {
-        console.log(`⚠ No pool found`);
-        return;
-    }
-
-    const poolPrice = pd.token0.toLowerCase() === tA.toLowerCase() ? pd.price : 1 / pd.price;
-    const targetPrice = marketPrice[infoA.symbol] / marketPrice[infoB.symbol];
-    const lower = targetPrice * 0.99;
-    const upper = targetPrice * 1.01;
-
-    console.log(
-        `  Pool: ${poolPrice.toFixed(6)} | Market: ${targetPrice.toFixed(6)} | Range: [${lower.toFixed(
-            6
-        )}, ${upper.toFixed(6)}]`
-    );
-
-    if (poolPrice >= lower && poolPrice <= upper) {
-        console.log(`  ✓ In range`);
-        return;
-    }
-
-    const swapData = getSwapAmount(pd, tA, targetPrice, infoA.decimals);
-    if (!swapData) {
-        console.log(`⚠ Cannot compute swap`);
-        return;
-    }
-
-    const infoIn =
-        swapData.tokenIn.toLowerCase() === tA.toLowerCase() ? infoA : infoB;
-    const amt = swapData.amount;
-
-    if (amt <= 0) {
-        console.log(`⚠ Invalid amount`);
-        return;
-    }
-    const tokenOut = swapData.tokenOut;
-    const estimatedOut = estimateOutput(amt, pd, swapData.tokenIn, tokenOut);
-
-    console.log(
-        `  → Swapping ${amt.toFixed(10)} ${swapData.tokenIn === tA ? infoA.symbol : infoB.symbol} ` +
-        `→ ${tokenOut} (≈ ${estimatedOut.toFixed(6)} ${tokenOut === tA ? infoA.symbol : infoB.symbol})`
-    );
-    const success = await swap(swapData.tokenIn, swapData.tokenOut, amt, infoIn.decimals);
-
-    if (!success) return;
-
-    // ✅ Fetch pool data again to confirm change
-    const pdAfter = await getPoolData(tA, tB);
-    const newPoolPrice =
-        pdAfter.token0.toLowerCase() === tA.toLowerCase() ? pdAfter.price : 1 / pdAfter.price;
-
-    const moved = Math.abs(newPoolPrice - targetPrice) < Math.abs(poolPrice - targetPrice);
-    console.log(`  📉 Old pool: ${poolPrice.toFixed(6)}`);
-    console.log(`  📈 New pool: ${newPoolPrice.toFixed(6)}`);
-    console.log(
-        moved
-            ? `  ✅ Price moved closer to target (${targetPrice.toFixed(6)})`
-            : `  ⚠ Price did not move toward target`
-    );
-}
-
-
-// =============== MAIN LOOP ===============
 
 async function main() {
-    console.log(`\n=== Running AMM Bot @ ${new Date().toLocaleTimeString()} ===`);
-
+    console.log("\n=== BOT CYCLE START ===");
+    console.log(`Time: ${new Date().toISOString()}`);
+    
     const market = await getMarketPrices();
     if (!market) {
-        console.log("Skipping run — market price fetch failed");
+        console.log("Failed to fetch market prices, skipping cycle");
         return;
     }
 
-    const tokenList = Object.entries(TOKENS);
-
-    for (const [symbol, address] of tokenList) {
-        if (symbol === "USDT") continue;
-
-        console.log(`\n-------------------------------`);
-        console.log(`Processing pair ${symbol}/USDT`);
-        console.log(`-------------------------------`);
-
-        try {
-            await rebalance(address, TOKENS.USDT, market);
-        } catch (err) {
-            console.log(`⚠ Error on ${symbol}: ${err.message}`);
-            console.log(`Skipping to next token...\n`);
-            continue; // 👉 ensures next token executes
+    for (const [symbol, token] of Object.entries(TOKENS)) {
+        if (symbol !== "USDT") {
+            try {
+                await adjustPrice(symbol, token, market);
+            } catch (e) {
+                console.log(`Error adjusting ${symbol}:`, e.message);
+            }
         }
     }
 
-    console.log("\n✓ Completed full cycle.\n");
+    console.log("=== BOT CYCLE COMPLETE ===\n");
 }
 
+// Run immediately on start
 main();
-setInterval(main, 100000);
+
+// Then run every 15 minutes (900000 ms)
+setInterval(main, 900000);

@@ -2,7 +2,7 @@
 import { ethers } from "ethers";
 import dotenv from "dotenv";
 import { createRequire } from "module";
-import { TOKENS } from "./constants.js"; // ensure this exports token addresses
+import { TOKENS } from "./constants.js";
 const require = createRequire(import.meta.url);
 dotenv.config();
 
@@ -10,28 +10,44 @@ dotenv.config();
 const ERC20_ABI = require("./ABI/IERC20.json").abi;
 const EXECUTOR_ABI = require("./ABI/LimitOrder.json");
 
-// ===== ENV CONFIG (set these in your .env) =====
+// ===== ENV CONFIG =====
 const { RPC_URL, PRIVATE_KEY, EXECUTOR_ADDRESS } = process.env;
 if (!RPC_URL || !PRIVATE_KEY || !EXECUTOR_ADDRESS)
     throw new Error("Missing .env vars (RPC_URL, PRIVATE_KEY, EXECUTOR_ADDRESS)");
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
-console.log("💼 Wallet address:", wallet.address);
+console.log("💼 Wallet:", wallet.address);
 
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, EXECUTOR_ABI, wallet);
 const ZERO = ethers.ZeroAddress;
 
-// ===== Utilities =====
+// ===== UTILITIES =====
+
+// Force 6-decimal amounts (tokens)
+function toFixed6(input) {
+    const n = Number(input);
+    if (!isFinite(n) || n <= 0) throw new Error(`Invalid amount: ${input}`);
+    return (Math.round(n * 1_000_000) / 1_000_000).toFixed(6);
+}
+
+// Force 4-decimal prices
+function toFixed4(input) {
+    const n = Number(input);
+    if (!isFinite(n) || n <= 0) throw new Error(`Invalid price: ${input}`);
+    return (Math.round(n * 10_000) / 10_000).toFixed(4);
+}
+
 function encodeSimplePrice(value) {
-    const n = parseFloat(value);
-    if (isNaN(n) || n <= 0) throw new Error("Invalid price");
-    // price scaled to 1e18
+    const n = Number(value);
+    if (!isFinite(n) || n <= 0) throw new Error("Invalid price");
     return ethers.parseUnits(n.toString(), 18);
 }
-function randomAmount(min = 0.1, max = 1) {
-    const val = (Math.random() * (max - min) + min).toFixed(4);
-    return val.toString();
+
+// random amount between min/max but forced to 6 decimals
+function randomAmount(min = 0.01, max = 0.1) {
+    const raw = Math.random() * (max - min) + min;
+    return toFixed6(raw);
 }
 
 async function getDecimals(token) {
@@ -42,9 +58,8 @@ async function getDecimals(token) {
 async function approveIfNeeded(token, spender, requiredAmount) {
     const c = new ethers.Contract(token, ERC20_ABI, wallet);
     const allowed = await c.allowance(wallet.address, spender);
-    // allowed and requiredAmount are BigInt
     if (allowed < requiredAmount) {
-        console.log(`Approving ${token.slice(0, 8)} for ${spender}...`);
+        console.log(`Approving ${token} → ${spender}...`);
         const tx = await c.approve(spender, ethers.MaxUint256);
         await tx.wait();
         console.log("✓ Approved");
@@ -52,167 +67,143 @@ async function approveIfNeeded(token, spender, requiredAmount) {
 }
 
 /**
- * Create order using simple CEX-style semantics:
- * - BUY: user pays (price * amount) of quoteToken (tokenIn) and expects `amount` base token (tokenOut)
- * - SELL: user pays `amount` of baseToken (tokenIn) and expects (price * amount) quote token (tokenOut)
- *
- * Params:
- *  - tokenIn, tokenOut: addresses
- *  - amountHuman: amount in human units (base units for SELL, base units for BUY receive)
- *  - priceTarget: price (quote per base), numeric or string
- *  - orderType: 0 = BUY, 1 = SELL
- *  - ttlDays: integer
+ * Create BUY / SELL orders with strictly formatted decimals.
  */
 async function createOrder({ tokenIn, tokenOut, amountHuman, priceTarget, orderType, ttlDays = 3 }) {
-    // Determine decimals for tokenIn and tokenOut
     const decimalsIn = await getDecimals(tokenIn);
     const decimalsOut = await getDecimals(tokenOut);
 
-    // Parse numeric inputs
-    const priceNum = parseFloat(String(priceTarget));
-    const amountNum = parseFloat(String(amountHuman));
-    if (isNaN(priceNum) || isNaN(amountNum) || priceNum <= 0 || amountNum <= 0) {
-        throw new Error("Invalid price or amount");
-    }
+    // enforce decimals
+    const priceStr = toFixed4(priceTarget);
+    const priceNum = Number(priceStr);
 
-    // For BUY: deposit = price * amount (in tokenIn decimals)
-    // For SELL: deposit = amount (in tokenIn decimals)
-    let amountIn;       // BigInt, in tokenIn smallest units
-    let amountOutMin;   // BigInt, in tokenOut smallest units (we set reasonable min)
+    const amountStr = toFixed6(amountHuman);
+    const amountNum = Number(amountStr);
+
+    let amountIn, amountOutMin;
+
     if (orderType === 0) {
         // BUY
-        // amountInHuman (what user pays in quote) = price * amount
-        const depositHuman = priceNum * amountNum;
-        amountIn = ethers.parseUnits(depositHuman.toString(), decimalsIn); // tokenIn is quote token
-        // amountOutMin: minimum base token expected (we accept exact amount * 0.99 slippage)
-        const amountOutHuman = amountNum * 0.99; // 1% slippage tolerance
-        amountOutMin = ethers.parseUnits(amountOutHuman.toString(), decimalsOut);
+        const depositHuman = toFixed6(priceNum * amountNum);
+        amountIn = ethers.parseUnits(depositHuman, decimalsIn);
+
+        const outHuman = toFixed6(amountNum * 0.99);
+        amountOutMin = ethers.parseUnits(outHuman, decimalsOut);
+
     } else {
         // SELL
-        // deposit = amountNum (base units)
-        amountIn = ethers.parseUnits(amountNum.toString(), decimalsIn); // tokenIn is base token
-        // amountOutMin: minimum quote token expected
-        const outHuman = priceNum * amountNum * 0.99; // 1% slippage tolerance
-        amountOutMin = ethers.parseUnits(outHuman.toString(), decimalsOut);
+        amountIn = ethers.parseUnits(amountStr, decimalsIn);
+
+        const outHuman = toFixed6(priceNum * amountNum * 0.99);
+        amountOutMin = ethers.parseUnits(outHuman, decimalsOut);
     }
 
     const ttlSeconds = Math.floor(ttlDays * 24 * 60 * 60);
 
-    // Approve tokenIn if needed
     await approveIfNeeded(tokenIn, EXECUTOR_ADDRESS, amountIn);
 
-    // Construct target price scaled to 1e18 (uint256)
     const targetPrice1e18 = encodeSimplePrice(priceNum);
 
-    // Use ZERO pool
-    const pool = ZERO;
-
-    // Call contract — ethers v6 requires overrides as last param (gasLimit bigint)
     const tx = await executor.depositAndCreateOrder(
         tokenIn,
         tokenOut,
-        pool,
         amountIn,
         amountOutMin,
         targetPrice1e18,
         ttlSeconds,
         orderType,
-        { gasLimit: 800000n } // must be bigint
+        { gasLimit: 850000n }
     );
 
     const receipt = await tx.wait();
     return { txHash: receipt.transactionHash, blockNumber: receipt.blockNumber };
 }
 
-// ===== MAIN: create a batch of test orders =====
+// ===== MAIN =====
+
 async function main() {
     const orders = [];
 
-    // Create some BUY orders: tokenIn = USDT (quote), tokenOut = USDC (base)
+    // BUY ORDERS
     for (let i = 0; i < 5; i++) {
-        const price = 0.14 - i * 0.001; // 1.000, 0.999, 0.998...
+        const price = toFixed4(0.0074 - i * 0.001);
         orders.push({
             tokenIn: TOKENS.USDT,
-            tokenOut: TOKENS.MATIC,
-            amountHuman: randomAmount(), // base amount they want to receive
+            tokenOut: TOKENS.GALA,
+            amountHuman: randomAmount(),
             priceTarget: price,
-            orderType: 0, // BUY
+            orderType: 0,
             ttlDays: 3
         });
     }
 
-    // Create some SELL orders: 
+    // SELL ORDERS
     for (let i = 0; i < 5; i++) {
-        const price = 0.14 + i * 0.001;
+        const price = toFixed4(0.0074 + i * 0.001);
         orders.push({
-            tokenIn: TOKENS.MATIC,
+            tokenIn: TOKENS.GALA,
             tokenOut: TOKENS.USDT,
             amountHuman: randomAmount(),
             priceTarget: price,
-            orderType: 1, // SELL
+            orderType: 1,
             ttlDays: 3
         });
     }
 
-    console.log(`\n📦 Creating ${orders.length} orders...`);
+    console.log(`\n📦 Creating ${orders.length} orders...\n`);
 
     for (const [i, ord] of orders.entries()) {
+        console.log(`#${i + 1} → ${ord.orderType === 0 ? "BUY" : "SELL"} @ ${ord.priceTarget} | amount=${ord.amountHuman}`);
         try {
-            console.log(`\n#${i + 1} → ${ord.orderType === 0 ? "BUY" : "SELL"} @ ${ord.priceTarget} | amount=${ord.amountHuman}`);
             const res = await createOrder(ord);
-            console.log(`   ✅ Tx: ${res.txHash} (block ${res.blockNumber})`);
+            console.log(`   ✅ Tx: ${res.txHash} (block ${res.blockNumber})\n`);
         } catch (err) {
-            console.error(`   ❌ Failed order #${i + 1}:`, err?.message ?? err);
+            console.error(`   ❌ Failed order #${i + 1}:`, err?.message, "\n");
         }
     }
 
-    console.log("\n✅ Batch done.");
+    console.log("✅ Batch done.\n");
 }
 
-// Optional helper: cancel all buy orders for a token created by this wallet
+// ===== CANCEL HELPERS =====
+
 async function cancelAllBuyOrdersForToken(targetTokenIn) {
-    console.log("🔍 scanning OrderCreated events for our buys...");
+    console.log("Scanning events...");
+
     const filter = executor.filters.OrderCreated();
-    // queryFilter over entire chain may be slow — adjust range if needed
     const logs = await executor.queryFilter(filter, 0, "latest");
+
     const myAddr = wallet.address.toLowerCase();
+    const buyIds = [];
 
-    const buyOrderIds = [];
     for (const ev of logs) {
-        const args = ev.args || {};
-        // Event fields may be named differently — check your ABI event arg names
-        const maker = String(args.maker).toLowerCase();
-        const tokenIn = String(args.tokenIn).toLowerCase();
-        const id = args.id ?? args.orderId ?? args._orderId ?? args[0]; // try multiple names
+        const a = ev.args || {};
+        if (String(a.maker).toLowerCase() !== myAddr) continue;
+        if (String(a.tokenIn).toLowerCase() !== String(targetTokenIn).toLowerCase()) continue;
 
-        if (maker === myAddr && tokenIn === targetTokenIn.toLowerCase()) {
-            // Determine orderType; event may contain it in args
-            if (Number(args.orderType ?? args[6] ?? 0) === 0) {
-                buyOrderIds.push(Number(id.toString ? id.toString() : id));
-            }
+        const type = Number(a.orderType ?? a[6] ?? 0);
+        if (type === 0) {
+            const id = Number(a.id ?? a.orderId ?? a._orderId ?? a[0]);
+            buyIds.push(id);
         }
     }
 
-    console.log(`Found ${buyOrderIds.length} buy orders to cancel.`);
+    console.log(`Found ${buyIds.length} BUY orders to cancel.`);
 
-    for (const id of buyOrderIds) {
+    for (const id of buyIds) {
         try {
             const tx = await executor.cancelOrder(id, { gasLimit: 200000n });
             await tx.wait();
-            console.log(`Cancelled #${id}`);
+            console.log("Cancelled", id);
         } catch (err) {
-            console.error(`Failed cancelling #${id}:`, err?.message ?? err);
+            console.log("Cancel error:", err?.message);
         }
     }
 }
 
-// Run main when script executed
+// ===== RUN =====
 if (process.argv.includes("--cancel-bnb-buys")) {
-    // example usage: node orderBatcher.js --cancel-bnb-buys
-    cancelAllBuyOrdersForToken(TOKENS.BNB).catch((e) => console.error(e));
+    cancelAllBuyOrdersForToken(TOKENS.BNB).catch(console.error);
 } else {
-    main().catch((e) => {
-        console.error(e);
-        process.exit(1);
-    });
+    main().catch(console.error);
 }
