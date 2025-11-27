@@ -200,7 +200,7 @@ async function adjustPrice(symbol, tokenA, market) {
     console.log("Real:", real, "OB:", ob);
 
     const deviation = Math.abs(real - ob) / ob;
-    const MAX_DEV = 0.01; // 1%
+    const MAX_DEV = 0.05; // 5%
 
     if (deviation < MAX_DEV) {
         console.log("Price within range, skipping");
