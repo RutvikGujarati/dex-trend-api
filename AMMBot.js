@@ -140,20 +140,6 @@ async function createOrder({ tokenIn, tokenOut, amountIn, amountOutMin, price, o
     }
 }
 
-async function matchOrders(buyId, sellId) {
-    console.log(`Matching BUY ${buyId} + SELL ${sellId}`);
-
-    try {
-        const tx = await executor.matchOrders(buyId, sellId, { gasLimit: 700000 });
-        const rc = await tx.wait();
-        console.log("Match success:", rc.transactionHash);
-        return true;
-    } catch (e) {
-        console.log("Match failed:", e.message);
-        return false;
-    }
-}
-
 async function getOnchainPrice(a, b) {
     try {
         const [p] = await executor.getLastExecutedPrice(a, b);
@@ -183,14 +169,19 @@ async function getMarketPrices() {
         return null;
     }
 }
-
 async function setPriceFromLive(symbol, tokenA, market) {
     const USDT = TOKENS.USDT;
 
-    // LIVE MARKET PRICE AS TARGET PRICE
-    const livePrice = market[symbol];
+    let livePrice;
+    if (symbol === "USDE") {
+        livePrice = 1;                // FIXED PRICE
+        console.log(`\n=== ${symbol} PRICE FIXED TO 1 ===`);
+    } else {
+        livePrice = market[symbol];
+    }
+
     if (!livePrice) {
-        console.log(`No live price for ${symbol}`);
+        console.log(`❌ No price found for ${symbol}`);
         return;
     }
 
@@ -198,7 +189,7 @@ async function setPriceFromLive(symbol, tokenA, market) {
     let obPrice = await getOnchainPrice(tokenA, USDT);
     if (!obPrice) obPrice = livePrice;
 
-    // DIFFERENCE CHECK
+    // % DIFFERENCE CHECK
     const diff = Math.abs(livePrice - obPrice) / obPrice;
 
     console.log(`\n=== ${symbol} PRICE CHECK ===`);
@@ -206,32 +197,31 @@ async function setPriceFromLive(symbol, tokenA, market) {
     console.log("Onchain:", obPrice);
     console.log(`Diff: ${(diff * 100).toFixed(2)}%`);
 
-    // ONLY UPDATE IF DIFFERENCE >= 1%
     if (diff < 0.01) {
-        console.log("❌ Difference < 1% → SKIPPING update");
+        console.log("❌ Difference < 1% → Skip update");
         return;
     }
 
-    console.log("✅ Difference >= 1% → Adjusting price");
+    console.log("✅ Difference ≥ 1% → Updating price");
 
     const targetPrice = livePrice;
 
-    // CONSTANT TRADE SIZE
-    const tradeAmount = 0.00001;
+    // -------- FIXED TRADE SIZE --------
+    const TRADE_TOKEN_AMOUNT = 0.0001;
 
     const decA = await getDecimals(tokenA);
     const decU = await getDecimals(USDT);
 
-    const amountToken = ethers.parseUnits(tradeAmount.toFixed(6), decA);
-    const amountUSDT = ethers.parseUnits((tradeAmount * targetPrice).toFixed(6), decU);
+    const amountToken = ethers.parseUnits(TRADE_TOKEN_AMOUNT.toFixed(6), decA);
+    const amountUSDT = ethers.parseUnits((TRADE_TOKEN_AMOUNT * targetPrice).toFixed(6), decU);
 
     const minOutA = amountToken * 99n / 100n;
     const minOutU = amountUSDT * 99n / 100n;
 
-    console.log(`Trade amount: ${tradeAmount} ${symbol}`);
-    console.log(`USDT amount: ${(tradeAmount * targetPrice).toFixed(6)}`);
+    console.log(`Trade: ${TRADE_TOKEN_AMOUNT} ${symbol}`);
+    console.log(`USDT: ${(TRADE_TOKEN_AMOUNT * targetPrice).toFixed(6)}`);
 
-    // BUY (USDT -> Token)
+    // ================= BUY (USDT -> Token) =================
     console.log("Creating BUY...");
     const buyId = await createOrder({
         tokenIn: USDT,
@@ -242,12 +232,12 @@ async function setPriceFromLive(symbol, tokenA, market) {
         orderType: 0
     });
 
-    if (buyId == null) {
-        console.log("BUY order failed");
+    if (!buyId && buyId !== 0) {
+        console.log("BUY creation failed");
         return;
     }
 
-    // SELL (Token -> USDT)
+    // ================= SELL (Token -> USDT) =================
     console.log("Creating SELL...");
     const sellId = await createOrder({
         tokenIn: tokenA,
@@ -258,13 +248,14 @@ async function setPriceFromLive(symbol, tokenA, market) {
         orderType: 1
     });
 
-    if (sellId == null) {
-        console.log("SELL order failed");
+    if (!sellId && sellId !== 0) {
+        console.log("SELL creation failed");
         return;
     }
 
-    console.log("✔ BUY + SELL submitted (will match automatically)");
+    console.log("✔ BUY + SELL submitted (pair re-priced successfully)");
 }
+
 
 
 

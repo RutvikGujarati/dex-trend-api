@@ -10,7 +10,7 @@ import EXECUTOR_ABI from "./ABI/ABI.json" with { type: "json" };
 
 const RPC_URL = process.env.RPC_URL || "https://api.skyhighblockchain.com";
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const EXECUTOR_ADDRESS ="0x14e904F5FfA5748813859879f8cA20e487F407D8";
+const EXECUTOR_ADDRESS = "0x14e904F5FfA5748813859879f8cA20e487F407D8";
 
 if (!PRIVATE_KEY) {
   console.error("❌ Missing PRIVATE_KEY in .env");
@@ -125,7 +125,7 @@ async function tryInternalMatches() {
     return;
   }
 
-  // group by pair
+  // group by token pairs
   const groups = new Map();
   for (const o of open) {
     const key = pairKey(o.tokenIn, o.tokenOut);
@@ -133,66 +133,66 @@ async function tryInternalMatches() {
     groups.get(key).push(o);
   }
 
-  // loop pairs
   for (const [key, orders] of groups.entries()) {
     if (!orders.length) continue;
 
-    const sample = orders[0];
-    const tokenA = sample.tokenIn;
-    const tokenB = sample.tokenOut;
+    const buys = orders.filter(o => o.orderType === 0);
+    const sells = orders.filter(o => o.orderType === 1);
 
-    const symA = await getSymbol(tokenA);
-    const symB = await getSymbol(tokenB);
+    if (!buys.length || !sells.length) continue;
 
-    console.log(`\n📌 Pair ${symA}/${symB}`);
-
-    const buys = orders.filter((o) => o.orderType === 0);
-    const sells = orders.filter((o) => o.orderType === 1);
-
-    if (!buys.length || !sells.length) {
-      console.log(`   ℹ️ No matching pair (buys: ${buys.length}, sells: ${sells.length})`);
-      continue;
-    }
-
-    // buy: highest first
+    // sort
     buys.sort((a, b) => Number(b.targetPrice1e18 - a.targetPrice1e18));
-    // sell: lowest first
     sells.sort((a, b) => Number(a.targetPrice1e18 - b.targetPrice1e18));
 
-    // Simple match logic: if buy price >= sell price, execute
+    // match once per pair
     for (const buy of buys) {
       for (const sell of sells) {
-        // ONLY condition: buy target price >= sell target price
-        if (buy.targetPrice1e18 >= sell.targetPrice1e18) {
-          console.log(
-            `   🔄 MATCH! BUY#${buy.id} (${ethers.formatUnits(
-              buy.targetPrice1e18,
-              18
-            )}) >= SELL#${sell.id} (${ethers.formatUnits(
-              sell.targetPrice1e18,
-              18
-            )})`
-          );
 
-          try {
-            const tx = await executor.matchOrders(buy.id, sell.id, {
-              gasLimit: 1_500_000
-            });
-            console.log(`   ⛽ Tx: ${tx.hash}`);
-            const receipt = await tx.wait();
-            console.log(`   ✅ Matched in block ${receipt.blockNumber}`);
-          } catch (err) {
-            console.log(`   ❌ Match failed: ${err?.message || err}`);
-          }
+        if (buy.targetPrice1e18 < sell.targetPrice1e18) continue;
 
-          break; // move to next buy order
+        console.log(`\n🔥 MATCH BUY#${buy.id} >= SELL#${sell.id}`);
+
+        try {
+          const tx = await executor.matchOrders(buy.id, sell.id, {
+            gasLimit: 1_500_000
+          });
+          console.log(`   ⛽ Tx: ${tx.hash}`);
+          const rc = await tx.wait();
+          console.log(`   ✔ matched at block ${rc.blockNumber}`);
+        } catch (err) {
+          console.log(`   ❌ Match failed: ${err.message}`);
         }
+
+        // ⛔ MUST RELOAD ORDER STATE AFTER MATCHING
+        const updatedBuy = await executor.getOrder(buy.id);
+        const updatedSell = await executor.getOrder(sell.id);
+
+        const buyClosed =
+          updatedBuy.filled ||
+          updatedBuy.cancelled ||
+          updatedBuy.amountIn === 0n;
+
+        const sellClosed =
+          updatedSell.filled ||
+          updatedSell.cancelled ||
+          updatedSell.amountIn === 0n;
+
+        // STOP re-matching
+        if (buyClosed || sellClosed) {
+          console.log("   🛑 Order closed → stopping further matches for this pair");
+          return; // finish this whole cycle
+        }
+
+        // break inner loop, continue matching next buy with next sells
+        break;
       }
     }
   }
 
   console.log("\n🏁 Match cycle complete.\n");
 }
+
 
 /* ----------------------------------------------------------------------
    LOOP
