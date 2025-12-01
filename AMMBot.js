@@ -83,7 +83,7 @@ async function swapFor(tokenNeeded, amountNeeded) {
 
 async function ensureBalance(token, requiredAmount) {
     const bal = await balanceOf(token);
-    
+
     if (bal >= requiredAmount) {
         console.log(`Sufficient balance: ${ethers.formatUnits(bal, await getDecimals(token))}`);
         return true;
@@ -91,14 +91,14 @@ async function ensureBalance(token, requiredAmount) {
 
     const shortage = requiredAmount - bal;
     console.log(`Balance low. Need: ${ethers.formatUnits(requiredAmount, await getDecimals(token))}, Have: ${ethers.formatUnits(bal, await getDecimals(token))}`);
-    
+
     // If token is not USDT, swap USDT for it
     if (token !== TOKENS.USDT) {
         // Estimate USDT needed (add 10% buffer for slippage)
         const usdtNeeded = shortage * 110n / 100n;
         return await swapFor(token, usdtNeeded);
     }
-    
+
     console.log("Insufficient USDT balance");
     return false;
 }
@@ -184,122 +184,108 @@ async function getMarketPrices() {
     }
 }
 
-async function adjustPrice(symbol, tokenA, market) {
+async function setPriceFromLive(symbol, tokenA, market) {
     const USDT = TOKENS.USDT;
 
-    const real = safeNum(market[symbol] / market["USDT"]);
-    if (!real) {
-        console.log("Real price invalid for", symbol);
+    // LIVE MARKET PRICE AS TARGET PRICE
+    const livePrice = market[symbol];
+    if (!livePrice) {
+        console.log(`No live price for ${symbol}`);
         return;
     }
 
-    let ob = await getOnchainPrice(tokenA, USDT);
-    if (!ob) ob = real;
+    // GET ONCHAIN PRICE
+    let obPrice = await getOnchainPrice(tokenA, USDT);
+    if (!obPrice) obPrice = livePrice;
 
-    console.log(`\n=== ${symbol} ===`);
-    console.log("Real:", real, "OB:", ob);
+    // DIFFERENCE CHECK
+    const diff = Math.abs(livePrice - obPrice) / obPrice;
 
-    const deviation = Math.abs(real - ob) / ob;
-    const MAX_DEV = 0.05; // 5%
+    console.log(`\n=== ${symbol} PRICE CHECK ===`);
+    console.log("Live:", livePrice);
+    console.log("Onchain:", obPrice);
+    console.log(`Diff: ${(diff * 100).toFixed(2)}%`);
 
-    if (deviation < MAX_DEV) {
-        console.log("Price within range, skipping");
+    // ONLY UPDATE IF DIFFERENCE >= 1%
+    if (diff < 0.01) {
+        console.log("❌ Difference < 1% → SKIPPING update");
         return;
     }
 
-    console.log(`Deviation: ${(deviation * 100).toFixed(2)}% - Adjusting...`);
+    console.log("✅ Difference >= 1% → Adjusting price");
 
-    const execPrice = safeNum(Number(real.toFixed(4)));
-    if (!execPrice) {
-        console.log("Exec price invalid");
-        return;
-    }
+    const targetPrice = livePrice;
 
-    // Use meaningful token amounts (0.01 tokens instead of 0.00001)
-    const tradeAmount = 0.01;
+    // CONSTANT TRADE SIZE
+    const tradeAmount = 0.00001;
+
     const decA = await getDecimals(tokenA);
     const decU = await getDecimals(USDT);
 
-    // Calculate amounts that will match exactly
-    const sellAmount = ethers.parseUnits(tradeAmount.toFixed(6), decA);
-    const buyAmount = ethers.parseUnits((execPrice * tradeAmount).toFixed(6), decU);
-    
-    // Set minimum outputs to 99% to allow for small rounding
-    const minOutA = sellAmount * 99n / 100n;
-    const minOutU = buyAmount * 99n / 100n;
+    const amountToken = ethers.parseUnits(tradeAmount.toFixed(6), decA);
+    const amountUSDT = ethers.parseUnits((tradeAmount * targetPrice).toFixed(6), decU);
 
-    console.log(`Trade Amount: ${tradeAmount} ${symbol}`);
-    console.log(`USDT Amount: ${(execPrice * tradeAmount).toFixed(6)} USDT`);
+    const minOutA = amountToken * 99n / 100n;
+    const minOutU = amountUSDT * 99n / 100n;
 
-    // Create BUY order (USDT -> Token)
-    console.log("Creating BUY order...");
+    console.log(`Trade amount: ${tradeAmount} ${symbol}`);
+    console.log(`USDT amount: ${(tradeAmount * targetPrice).toFixed(6)}`);
+
+    // BUY (USDT -> Token)
+    console.log("Creating BUY...");
     const buyId = await createOrder({
         tokenIn: USDT,
         tokenOut: tokenA,
-        amountIn: buyAmount,
+        amountIn: amountUSDT,
         amountOutMin: minOutA,
-        price: execPrice,
+        price: targetPrice,
         orderType: 0
     });
 
-    if (!buyId && buyId !== 0) {
-        console.log("BUY order creation failed");
+    if (buyId == null) {
+        console.log("BUY order failed");
         return;
     }
 
-    // Create SELL order (Token -> USDT)
-    console.log("Creating SELL order...");
+    // SELL (Token -> USDT)
+    console.log("Creating SELL...");
     const sellId = await createOrder({
         tokenIn: tokenA,
         tokenOut: USDT,
-        amountIn: sellAmount,
+        amountIn: amountToken,
         amountOutMin: minOutU,
-        price: execPrice,
+        price: targetPrice,
         orderType: 1
     });
 
-    if (!sellId && sellId !== 0) {
-        console.log("SELL order creation failed");
+    if (sellId == null) {
+        console.log("SELL order failed");
         return;
     }
 
-    // Match the orders
-    const matched = await matchOrders(buyId, sellId);
-    
-    if (matched) {
-        const newP = await getOnchainPrice(tokenA, USDT);
-        console.log("Updated Onchain Price:", newP);
-        console.log(`Price adjustment successful!`);
-    } else {
-        console.log("Price adjustment failed - orders did not match");
-    }
+    console.log("✔ BUY + SELL submitted (will match automatically)");
 }
+
+
 
 async function main() {
     console.log("\n=== BOT CYCLE START ===");
-    console.log(`Time: ${new Date().toISOString()}`);
-    
+
     const market = await getMarketPrices();
     if (!market) {
-        console.log("Failed to fetch market prices, skipping cycle");
+        console.log("Could not fetch prices");
         return;
     }
 
     for (const [symbol, token] of Object.entries(TOKENS)) {
         if (symbol !== "USDT") {
-            try {
-                await adjustPrice(symbol, token, market);
-            } catch (e) {
-                console.log(`Error adjusting ${symbol}:`, e.message);
-            }
+            await setPriceFromLive(symbol, token, market);
         }
     }
 
-    console.log("=== BOT CYCLE COMPLETE ===\n");
+    console.log("=== BOT CYCLE END ===\n");
 }
 
-// Run immediately on start
 main();
 
-// Then run every 15 minutes (900000 ms)
-setInterval(main, 900000);
+setInterval(main, 7200000);
