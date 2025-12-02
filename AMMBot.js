@@ -20,22 +20,12 @@ const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, EXECUTOR_ABI, wallet);
 const router = new ethers.Contract(UNISWAP_ROUTER, ROUTER_ABI, wallet);
 
-const TRADE_SIZES = [0.0001, 0.001, 0.1, 1, 2, 3, 4, 5];
-
-function selectTradeSize(p) {
-    const t = 10;
-    let b = TRADE_SIZES[0];
-    let d = Infinity;
-    for (const s of TRADE_SIZES) {
-        const n = p * s;
-        const df = Math.abs(n - t);
-        if (df < d) {
-            d = df;
-            b = s;
-        }
-    }
-    return b;
-}
+// Fixed trade amounts per token
+const FIXED_TRADE_AMOUNTS = {
+    BTC: 0.001,
+    ETH: 0.001,
+    BNB: 0.001,
+};
 
 async function getDecimals(t) {
     return Number(await new ethers.Contract(t, ERC20_ABI, provider).decimals());
@@ -182,7 +172,8 @@ async function setPriceFromLive(symbol, tokenA, market) {
 
     const targetPrice = livePrice;
 
-    const TRADE_TOKEN_AMOUNT = selectTradeSize(targetPrice);
+    // Use fixed trade amount for this token
+    const TRADE_TOKEN_AMOUNT = FIXED_TRADE_AMOUNTS[symbol] || 1;
 
     const decA = await getDecimals(tokenA);
     const decU = await getDecimals(USDT);
@@ -193,7 +184,7 @@ async function setPriceFromLive(symbol, tokenA, market) {
     const minOutA = amountToken;
     const minOutU = amountUSDT;
 
-    console.log("Trade amount selected:", TRADE_TOKEN_AMOUNT);
+    console.log("Trade amount (FIXED):", TRADE_TOKEN_AMOUNT);
     console.log("Token amount:", TRADE_TOKEN_AMOUNT);
     console.log("USDT amount:", (TRADE_TOKEN_AMOUNT * targetPrice).toFixed(6));
 

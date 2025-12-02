@@ -21,7 +21,12 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, EXECUTOR_ABI, wallet);
 
-// minimal ABI
+// Minimal ERC20 ABI
+const ERC20_ABI = [
+  "function symbol() view returns (string)",
+  "function decimals() view returns (uint8)",
+  "function balanceOf(address) view returns (uint256)"
+];
 
 // cache symbols
 const tokenCache = new Map();
@@ -41,6 +46,11 @@ async function getSymbol(addr) {
     return fallback;
   }
 }
+
+const ALLOWED_SELF_MATCH = "0x3bdbb84b90abaf52814aab54b9622408f2dca483";
+
+// track how many times a specific buy/sell pair was tried
+const matchAttemptCount = new Map();
 
 /* ----------------------------------------------------------------------
    FETCH ALL OPEN ORDERS
@@ -65,13 +75,11 @@ async function fetchOpenOrders() {
   for (const { id, o } of results) {
     if (!o) continue;
 
-    // ---- Defensive extraction ----
     const maker = o.maker || ethers.ZeroAddress;
     const tokenIn = o.tokenIn ? o.tokenIn.toLowerCase() : ethers.ZeroAddress;
     const tokenOut = o.tokenOut ? o.tokenOut.toLowerCase() : ethers.ZeroAddress;
     const pool = o.pool ? o.pool.toLowerCase() : ethers.ZeroAddress;
 
-    // numeric conversions, fallback to zero
     let amountIn, expiry, orderType, filled, cancelled, targetPrice1e18;
 
     try { amountIn = BigInt(o.amountIn?.toString() ?? "0"); } catch { amountIn = 0n; }
@@ -81,11 +89,9 @@ async function fetchOpenOrders() {
     try { cancelled = Boolean(o.cancelled); } catch { cancelled = false; }
     try { targetPrice1e18 = BigInt(o.targetPrice1e18?.toString() ?? "0"); } catch { targetPrice1e18 = 0n; }
 
-    // skip invalid or zero orders
     if (!maker || maker === ethers.ZeroAddress) continue;
 
-    // FILTER active orders
-    if (!filled && !cancelled && expiry > now) {
+    if (!filled && !cancelled && expiry > now && amountIn > 0n) {
       open.push({
         id,
         maker,
@@ -114,7 +120,15 @@ function pairKey(a, b) {
 }
 
 /* ----------------------------------------------------------------------
-   SIMPLIFIED MATCHING LOGIC - Just compare buy vs sell prices
+   Price comparison with tolerance for rounding errors
+------------------------------------------------------------------------ */
+function pricesMatch(buyPrice, sellPrice) {
+  const tolerance = BigInt(Math.floor(Number(buyPrice) * 0.0001));
+  return buyPrice >= (sellPrice - tolerance);
+}
+
+/* ----------------------------------------------------------------------
+   MATCHING LOGIC with "3 strikes then cancel" per pair
 ------------------------------------------------------------------------ */
 async function tryInternalMatches() {
   console.log("\n🔍 Checking for matches...");
@@ -125,7 +139,8 @@ async function tryInternalMatches() {
     return;
   }
 
-  // group by token pairs
+  console.log(`📊 Found ${open.length} open orders`);
+
   const groups = new Map();
   for (const o of open) {
     const key = pairKey(o.tokenIn, o.tokenOut);
@@ -133,25 +148,102 @@ async function tryInternalMatches() {
     groups.get(key).push(o);
   }
 
+  console.log(`🔗 Found ${groups.size} trading pairs`);
+
   for (const [key, orders] of groups.entries()) {
     if (!orders.length) continue;
 
     const buys = orders.filter(o => o.orderType === 0);
     const sells = orders.filter(o => o.orderType === 1);
 
-    if (!buys.length || !sells.length) continue;
+    if (!buys.length || !sells.length) {
+      console.log(`⏭️ Pair ${key}: ${buys.length} buys, ${sells.length} sells - skipping`);
+      continue;
+    }
 
-    // sort
+    console.log(`\n📈 Pair ${key}: ${buys.length} buys, ${sells.length} sells`);
+
     buys.sort((a, b) => Number(b.targetPrice1e18 - a.targetPrice1e18));
     sells.sort((a, b) => Number(a.targetPrice1e18 - b.targetPrice1e18));
 
-    // match once per pair
     for (const buy of buys) {
       for (const sell of sells) {
+        const buyMaker = buy.maker.toLowerCase();
+        const sellMaker = sell.maker.toLowerCase();
 
-        if (buy.targetPrice1e18 < sell.targetPrice1e18) continue;
+        if (buyMaker === sellMaker && buyMaker !== ALLOWED_SELF_MATCH.toLowerCase()) {
+          console.log(`⏭️ Skipping self-match: BUY#${buy.id} and SELL#${sell.id}`);
+          continue;
+        }
 
-        console.log(`\n🔥 MATCH BUY#${buy.id} >= SELL#${sell.id}`);
+        if (buyMaker === sellMaker && buyMaker === ALLOWED_SELF_MATCH.toLowerCase()) {
+          console.log(`✅ Allowing self-match for whitelisted address: BUY#${buy.id} and SELL#${sell.id}`);
+        }
+
+        if (!pricesMatch(buy.targetPrice1e18, sell.targetPrice1e18)) {
+          console.log(
+            `⏭️ Price mismatch: BUY#${buy.id} (${ethers.formatUnits(
+              buy.targetPrice1e18,
+              18
+            )}) < SELL#${sell.id} (${ethers.formatUnits(sell.targetPrice1e18, 18)})`
+          );
+          continue;
+        }
+
+        // track attempts per BUY/SELL pair
+        const pairIdKey = `${buy.id}-${sell.id}`;
+        const prevAttempts = matchAttemptCount.get(pairIdKey) || 0;
+        const attempts = prevAttempts + 1;
+        matchAttemptCount.set(pairIdKey, attempts);
+
+        console.log(
+          `\n🔥 MATCH FOUND! BUY#${buy.id} / SELL#${sell.id} (attempt ${attempts})`
+        );
+        console.log(
+          `   BUY#${buy.id}: ${ethers.formatUnits(
+            buy.amountIn,
+            18
+          )} @ ${ethers.formatUnits(buy.targetPrice1e18, 18)}`
+        );
+        console.log(
+          `   SELL#${sell.id}: ${ethers.formatUnits(
+            sell.amountIn,
+            18
+          )} @ ${ethers.formatUnits(sell.targetPrice1e18, 18)}`
+        );
+
+        // if this pair reached 3rd attempt, cancel both orders
+        if (attempts >= 3) {
+          console.log(
+            `   🚫 Too many attempts for BUY#${buy.id} / SELL#${sell.id} → cancelling both orders`
+          );
+
+          try {
+            const tx1 = await executor.cancelOrder(buy.id, { gasLimit: 500000 });
+            console.log(`   ⛽ Cancel BUY tx: ${tx1.hash}`);
+            await tx1.wait();
+            console.log(`   ✅ BUY#${buy.id} cancelled`);
+          } catch (err) {
+            console.log(
+              `   ❌ Failed to cancel BUY#${buy.id}: ${err.message || err}`
+            );
+          }
+
+          try {
+            const tx2 = await executor.cancelOrder(sell.id, { gasLimit: 500000 });
+            console.log(`   ⛽ Cancel SELL tx: ${tx2.hash}`);
+            await tx2.wait();
+            console.log(`   ✅ SELL#${sell.id} cancelled`);
+          } catch (err) {
+            console.log(
+              `   ❌ Failed to cancel SELL#${sell.id}: ${err.message || err}`
+            );
+          }
+
+          matchAttemptCount.delete(pairIdKey);
+          console.log("   🛑 Stopping further matches for this pair in this cycle");
+          break;
+        }
 
         try {
           const tx = await executor.matchOrders(buy.id, sell.id, {
@@ -159,32 +251,42 @@ async function tryInternalMatches() {
           });
           console.log(`   ⛽ Tx: ${tx.hash}`);
           const rc = await tx.wait();
-          console.log(`   ✔ matched at block ${rc.blockNumber}`);
+          console.log(`   ✅ Matched at block ${rc.blockNumber}`);
         } catch (err) {
           console.log(`   ❌ Match failed: ${err.message}`);
+          continue;
         }
 
-        // ⛔ MUST RELOAD ORDER STATE AFTER MATCHING
         const updatedBuy = await executor.getOrder(buy.id);
         const updatedSell = await executor.getOrder(sell.id);
+
+        const buyAmountLeft = BigInt(updatedBuy.amountIn?.toString() ?? "0");
+        const sellAmountLeft = BigInt(updatedSell.amountIn?.toString() ?? "0");
+
+        console.log(
+          `   📊 Remaining: BUY=${ethers.formatUnits(
+            buyAmountLeft,
+            18
+          )}, SELL=${ethers.formatUnits(sellAmountLeft, 18)}`
+        );
 
         const buyClosed =
           updatedBuy.filled ||
           updatedBuy.cancelled ||
-          updatedBuy.amountIn === 0n;
+          buyAmountLeft === 0n;
 
         const sellClosed =
           updatedSell.filled ||
           updatedSell.cancelled ||
-          updatedSell.amountIn === 0n;
+          sellAmountLeft === 0n;
 
-        // STOP re-matching
         if (buyClosed || sellClosed) {
-          console.log("   🛑 Order closed → stopping further matches for this pair");
-          return; // finish this whole cycle
+          console.log(
+            "   🛑 Order closed → stopping further matches for this pair"
+          );
+          return;
         }
 
-        // break inner loop, continue matching next buy with next sells
         break;
       }
     }
@@ -192,7 +294,6 @@ async function tryInternalMatches() {
 
   console.log("\n🏁 Match cycle complete.\n");
 }
-
 
 /* ----------------------------------------------------------------------
    LOOP
@@ -218,7 +319,9 @@ const app = express();
 app.use(cors({ origin: "*" }));
 const PORT = process.env.PORT || 4000;
 
-app.get("/", (req, res) => res.json({ status: "ok", executor: EXECUTOR_ADDRESS }));
+app.get("/", (req, res) =>
+  res.json({ status: "ok", executor: EXECUTOR_ADDRESS })
+);
 
 app.get("/order/:id", async (req, res) => {
   try {
