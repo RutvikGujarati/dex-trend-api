@@ -170,6 +170,43 @@ async function tryInternalMatches() {
       for (const sell of sells) {
         const buyMaker = buy.maker.toLowerCase();
         const sellMaker = sell.maker.toLowerCase();
+        const DUST_THRESHOLD = 1_000_000_000_000n; // 1e12 wei = 0.000001 tokens (for 18 decimals)
+
+        if (buy.amountIn < DUST_THRESHOLD) {
+          console.log(`⚠️ BUY#${buy.id} is dust: ${buy.amountIn}. Handling...`);
+
+          if (buyMaker === ALLOWED_SELF_MATCH.toLowerCase()) {
+            console.log(`🗑️ Cancelling your dust BUY#${buy.id}`);
+            try {
+              const tx = await executor.cancelOrder(buy.id);
+              console.log(`   ⛽ Cancel BUY tx: ${tx.hash}`);
+              await tx.wait();
+            } catch (e) {
+              console.log(`   ❌ Failed to cancel BUY: ${e.message}`);
+            }
+          } else {
+            console.log(`⛔ Skipping dust BUY#${buy.id} (not your order)`);
+          }
+          continue; // skip matching completely
+        }
+
+        if (sell.amountIn < DUST_THRESHOLD) {
+          console.log(`⚠️ SELL#${sell.id} is dust: ${sell.amountIn}. Handling...`);
+
+          if (sellMaker === ALLOWED_SELF_MATCH.toLowerCase()) {
+            console.log(`🗑️ Cancelling your dust SELL#${sell.id}`);
+            try {
+              const tx = await executor.cancelOrder(sell.id);
+              console.log(`   ⛽ Cancel SELL tx: ${tx.hash}`);
+              await tx.wait();
+            } catch (e) {
+              console.log(`   ❌ Failed to cancel SELL: ${e.message}`);
+            }
+          } else {
+            console.log(`⛔ Skipping dust SELL#${sell.id} (not your order)`);
+          }
+          continue;
+        }
 
         if (buyMaker === sellMaker && buyMaker !== ALLOWED_SELF_MATCH.toLowerCase()) {
           console.log(`⏭️ Skipping self-match: BUY#${buy.id} and SELL#${sell.id}`);
@@ -214,36 +251,37 @@ async function tryInternalMatches() {
 
         // if this pair reached 3rd attempt, cancel both orders
         if (attempts >= 3) {
-          console.log(
-            `   🚫 Too many attempts for BUY#${buy.id} / SELL#${sell.id} → cancelling both orders`
-          );
+          console.log(`🚫 Too many attempts for BUY#${buy.id} / SELL#${sell.id}`);
 
-          try {
-            const tx1 = await executor.cancelOrder(buy.id, { gasLimit: 500000 });
-            console.log(`   ⛽ Cancel BUY tx: ${tx1.hash}`);
-            await tx1.wait();
-            console.log(`   ✅ BUY#${buy.id} cancelled`);
-          } catch (err) {
-            console.log(
-              `   ❌ Failed to cancel BUY#${buy.id}: ${err.message || err}`
-            );
+          if (buyMaker === ALLOWED_SELF_MATCH.toLowerCase()) {
+            try {
+              const tx1 = await executor.cancelOrder(buy.id);
+              console.log(`   🗑️ Cancelled your BUY#${buy.id}`);
+              await tx1.wait();
+            } catch (e) {
+              console.log(`   ❌ Failed to cancel BUY: ${e.message}`);
+            }
+          } else {
+            console.log(`⛔ Not allowed to cancel BUY#${buy.id} (not your address)`);
           }
 
-          try {
-            const tx2 = await executor.cancelOrder(sell.id, { gasLimit: 500000 });
-            console.log(`   ⛽ Cancel SELL tx: ${tx2.hash}`);
-            await tx2.wait();
-            console.log(`   ✅ SELL#${sell.id} cancelled`);
-          } catch (err) {
-            console.log(
-              `   ❌ Failed to cancel SELL#${sell.id}: ${err.message || err}`
-            );
+          if (sellMaker === ALLOWED_SELF_MATCH.toLowerCase()) {
+            try {
+              const tx2 = await executor.cancelOrder(sell.id);
+              console.log(`   🗑️ Cancelled your SELL#${sell.id}`);
+              await tx2.wait();
+            } catch (e) {
+              console.log(`   ❌ Failed to cancel SELL: ${e.message}`);
+            }
+          } else {
+            console.log(`⛔ Not allowed to cancel SELL#${sell.id} (not your address)`);
           }
 
           matchAttemptCount.delete(pairIdKey);
-          console.log("   🛑 Stopping further matches for this pair in this cycle");
-          break;
+          console.log("🛑 Skipping this pair further");
+          continue;
         }
+
 
         try {
           const tx = await executor.matchOrders(buy.id, sell.id, {
