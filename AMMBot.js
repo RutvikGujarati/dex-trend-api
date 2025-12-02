@@ -207,7 +207,7 @@ async function setPriceFromLive(symbol, tokenA, market) {
     const targetPrice = livePrice;
 
     // -------- FIXED TRADE SIZE --------
-    const TRADE_TOKEN_AMOUNT = 0.0001;
+    const TRADE_TOKEN_AMOUNT = 0.001;
 
     const decA = await getDecimals(tokenA);
     const decU = await getDecimals(USDT);
