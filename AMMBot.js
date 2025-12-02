@@ -12,13 +12,30 @@ const ERC20_ABI = require("./ABI/IERC20.json").abi;
 const ROUTER_ABI = require("./ABI/RouterABI.json").abi;
 
 const { RPC_URL, PRIVATE_KEY } = process.env;
-const EXECUTOR_ADDRESS = "0x14e904F5FfA5748813859879f8cA20e487F407D8"
-const UNISWAP_ROUTER = "0x459A438Fbe3Cb71f2F8e251F181576d5a035Faef"
+const EXECUTOR_ADDRESS = "0x14e904F5FfA5748813859879f8cA20e487F407D8";
+const UNISWAP_ROUTER = "0x459A438Fbe3Cb71f2F8e251F181576d5a035Faef";
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const executor = new ethers.Contract(EXECUTOR_ADDRESS, EXECUTOR_ABI, wallet);
 const router = new ethers.Contract(UNISWAP_ROUTER, ROUTER_ABI, wallet);
+
+const TRADE_SIZES = [0.0001, 0.001, 0.1, 1, 2, 3, 4, 5];
+
+function selectTradeSize(p) {
+    const t = 10;
+    let b = TRADE_SIZES[0];
+    let d = Infinity;
+    for (const s of TRADE_SIZES) {
+        const n = p * s;
+        const df = Math.abs(n - t);
+        if (df < d) {
+            d = df;
+            b = s;
+        }
+    }
+    return b;
+}
 
 async function getDecimals(t) {
     return Number(await new ethers.Contract(t, ERC20_ABI, provider).decimals());
@@ -32,7 +49,6 @@ async function approveIfNeeded(token, spender, amt) {
     const c = new ethers.Contract(token, ERC20_ABI, wallet);
     const allowance = await c.allowance(wallet.address, spender);
     if (allowance < amt) {
-        console.log(`Approving ${token}...`);
         const tx = await c.approve(spender, ethers.MaxUint256);
         await tx.wait();
     }
@@ -50,16 +66,8 @@ function encodePrice(p) {
 async function swapFor(tokenNeeded, amountNeeded) {
     const usdt = TOKENS.USDT;
     const bal = await balanceOf(usdt);
-
-    if (bal < amountNeeded) {
-        console.log("Not enough USDT to swap");
-        return false;
-    }
-
-    console.log(`Swapping USDT → ${tokenNeeded} amount=${ethers.formatUnits(amountNeeded, 6)}`);
-
+    if (bal < amountNeeded) return false;
     await approveIfNeeded(usdt, UNISWAP_ROUTER, amountNeeded);
-
     try {
         const tx = await router.exactInputSingle({
             tokenIn: usdt,
@@ -71,54 +79,31 @@ async function swapFor(tokenNeeded, amountNeeded) {
             amountOutMinimum: 0,
             sqrtPriceLimitX96: 0
         }, { gasLimit: 500000 });
-
         await tx.wait();
-        console.log("Swap completed successfully");
         return true;
-    } catch (e) {
-        console.log("Swap failed:", e.message);
+    } catch {
         return false;
     }
 }
 
 async function ensureBalance(token, requiredAmount) {
     const bal = await balanceOf(token);
-
-    if (bal >= requiredAmount) {
-        console.log(`Sufficient balance: ${ethers.formatUnits(bal, await getDecimals(token))}`);
-        return true;
-    }
-
+    if (bal >= requiredAmount) return true;
     const shortage = requiredAmount - bal;
-    console.log(`Balance low. Need: ${ethers.formatUnits(requiredAmount, await getDecimals(token))}, Have: ${ethers.formatUnits(bal, await getDecimals(token))}`);
-
-    // If token is not USDT, swap USDT for it
     if (token !== TOKENS.USDT) {
-        // Estimate USDT needed (add 10% buffer for slippage)
         const usdtNeeded = shortage * 110n / 100n;
         return await swapFor(token, usdtNeeded);
     }
-
-    console.log("Insufficient USDT balance");
     return false;
 }
 
 async function createOrder({ tokenIn, tokenOut, amountIn, amountOutMin, price, orderType }) {
-    console.log(`Creating ${orderType === 0 ? 'BUY' : 'SELL'} order at price=${price}`);
-
-    // Ensure we have enough balance, swap if needed
     const hasBalance = await ensureBalance(tokenIn, amountIn);
-    if (!hasBalance) {
-        console.log("Failed to ensure sufficient balance");
-        return null;
-    }
-
+    if (!hasBalance) return null;
     await approveIfNeeded(tokenIn, EXECUTOR_ADDRESS, amountIn);
-
     const ttl = 3 * 86400;
     const p1e18 = encodePrice(price);
     const nextId = Number(await executor.nextOrderId());
-
     try {
         const tx = await executor.depositAndCreateOrder(
             tokenIn,
@@ -130,12 +115,9 @@ async function createOrder({ tokenIn, tokenOut, amountIn, amountOutMin, price, o
             orderType,
             { gasLimit: 700000 }
         );
-
         const rc = await tx.wait();
-        console.log(`Order ${nextId} created at tx: ${rc.transactionHash}`);
         return nextId;
-    } catch (e) {
-        console.log(`Order creation failed: ${e.message}`);
+    } catch {
         return null;
     }
 }
@@ -154,27 +136,23 @@ async function getMarketPrices() {
     try {
         const ids = Object.values(COINGECKO_IDS).join(",");
         const r = await axios.get(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`);
-
         const out = {};
         for (const [sym, id] of Object.entries(COINGECKO_IDS)) {
             const price = r.data[id]?.usd;
             out[sym] = safeNum(price);
         }
-
-        console.log("Market prices:", out);
         return out;
-
-    } catch (e) {
-        console.log("Price fetch error:", e.message);
+    } catch {
         return null;
     }
 }
+
 async function setPriceFromLive(symbol, tokenA, market) {
     const USDT = TOKENS.USDT;
 
     let livePrice;
     if (symbol === "USDE") {
-        livePrice = 1;                // FIXED PRICE
+        livePrice = 1;
         console.log(`\n=== ${symbol} PRICE FIXED TO 1 ===`);
     } else {
         livePrice = market[symbol];
@@ -185,11 +163,9 @@ async function setPriceFromLive(symbol, tokenA, market) {
         return;
     }
 
-    // GET ONCHAIN PRICE
     let obPrice = await getOnchainPrice(tokenA, USDT);
     if (!obPrice) obPrice = livePrice;
 
-    // % DIFFERENCE CHECK
     const diff = Math.abs(livePrice - obPrice) / obPrice;
 
     console.log(`\n=== ${symbol} PRICE CHECK ===`);
@@ -206,22 +182,21 @@ async function setPriceFromLive(symbol, tokenA, market) {
 
     const targetPrice = livePrice;
 
-    // -------- FIXED TRADE SIZE --------
-    const TRADE_TOKEN_AMOUNT = 0.001;
+    const TRADE_TOKEN_AMOUNT = selectTradeSize(targetPrice);
 
     const decA = await getDecimals(tokenA);
     const decU = await getDecimals(USDT);
 
-    const amountToken = ethers.parseUnits(TRADE_TOKEN_AMOUNT.toFixed(6), decA);
+    const amountToken = ethers.parseUnits(TRADE_TOKEN_AMOUNT.toString(), decA);
     const amountUSDT = ethers.parseUnits((TRADE_TOKEN_AMOUNT * targetPrice).toFixed(6), decU);
 
-    const minOutA = amountToken * 99n / 100n;
-    const minOutU = amountUSDT * 99n / 100n;
+    const minOutA = amountToken;
+    const minOutU = amountUSDT;
 
-    console.log(`Trade: ${TRADE_TOKEN_AMOUNT} ${symbol}`);
-    console.log(`USDT: ${(TRADE_TOKEN_AMOUNT * targetPrice).toFixed(6)}`);
+    console.log("Trade amount selected:", TRADE_TOKEN_AMOUNT);
+    console.log("Token amount:", TRADE_TOKEN_AMOUNT);
+    console.log("USDT amount:", (TRADE_TOKEN_AMOUNT * targetPrice).toFixed(6));
 
-    // ================= BUY (USDT -> Token) =================
     console.log("Creating BUY...");
     const buyId = await createOrder({
         tokenIn: USDT,
@@ -233,11 +208,10 @@ async function setPriceFromLive(symbol, tokenA, market) {
     });
 
     if (!buyId && buyId !== 0) {
-        console.log("BUY creation failed");
+        console.log("❌ BUY creation failed");
         return;
     }
 
-    // ================= SELL (Token -> USDT) =================
     console.log("Creating SELL...");
     const sellId = await createOrder({
         tokenIn: tokenA,
@@ -249,34 +223,22 @@ async function setPriceFromLive(symbol, tokenA, market) {
     });
 
     if (!sellId && sellId !== 0) {
-        console.log("SELL creation failed");
+        console.log("❌ SELL creation failed");
         return;
     }
 
-    console.log("✔ BUY + SELL submitted (pair re-priced successfully)");
+    console.log("✔ BUY + SELL submitted successfully");
 }
 
-
-
-
 async function main() {
-    console.log("\n=== BOT CYCLE START ===");
-
     const market = await getMarketPrices();
-    if (!market) {
-        console.log("Could not fetch prices");
-        return;
-    }
-
+    if (!market) return;
     for (const [symbol, token] of Object.entries(TOKENS)) {
         if (symbol !== "USDT") {
             await setPriceFromLive(symbol, token, market);
         }
     }
-
-    console.log("=== BOT CYCLE END ===\n");
 }
 
 main();
-
 setInterval(main, 300000);
