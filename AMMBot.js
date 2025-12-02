@@ -279,4 +279,4 @@ async function main() {
 
 main();
 
-setInterval(main, 7200000);
+setInterval(main, 300000);
