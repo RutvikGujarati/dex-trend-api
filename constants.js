@@ -6,7 +6,7 @@ const COINGECKO_IDS = {
   ETH: "ethereum",
   USDT: "tether",
   USDC: "usd-coin",
-  MATIC: "ex-MATIC",
+  MATIC: "polygon-ecosystem-token",
   BTC: "bitcoin",
   BNB: "binancecoin",
   SOL: "solana",
