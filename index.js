@@ -9,7 +9,7 @@ dotenv.config();
 
 const RPC_URL = process.env.RPC_URL || "https://api.skyhighblockchain.com";
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const EXECUTOR_ADDRESS = "0x14e904F5FfA5748813859879f8cA20e487F407D8";
+const EXECUTOR_ADDRESS = "0x59AEeACD225bD2b2B178B2cDa53D6c6759bB2966";
 const ALLOWED_SELF_MATCH = "0x3bdbb84b90abaf52814aab54b9622408f2dca483";
 const DUST_THRESHOLD = 1_000_000_000_000n;
 

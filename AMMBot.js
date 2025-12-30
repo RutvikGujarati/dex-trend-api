@@ -13,8 +13,8 @@ const ERC20_ABI = require("./ABI/IERC20.json").abi;
 const ROUTER_ABI = require("./ABI/RouterABI.json").abi;
 
 const { RPC_URL, PRIVATE_KEY } = process.env;
-const EXECUTOR_ADDRESS = "0x14e904F5FfA5748813859879f8cA20e487F407D8";
-const UNISWAP_ROUTER = "0x459A438Fbe3Cb71f2F8e251F181576d5a035Faef";
+const EXECUTOR_ADDRESS = "0x59AEeACD225bD2b2B178B2cDa53D6c6759bB2966";
+const UNISWAP_ROUTER = "0x81Ba02Ca510a58560D183F0F5eE42E47D1846245";
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
