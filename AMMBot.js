@@ -24,8 +24,14 @@ const router = new ethers.Contract(UNISWAP_ROUTER, ROUTER_ABI, wallet);
 const FIXED_TRADE_AMOUNTS = { BTC: 0.001, ETH: 0.001, BNB: 0.001 };
 const DUMMY_ORDER_AMOUNT = 0.0001;
 
+// ✅ Safer getDecimals
 async function getDecimals(t) {
-  return Number(await new ethers.Contract(t, ERC20_ABI, provider).decimals());
+  try {
+    return Number(await new ethers.Contract(t, ERC20_ABI, provider).decimals());
+  } catch (e) {
+    console.error(`❌ Error fetching decimals for ${t}. Check address/chain.`);
+    return 18; // Default to 18 to prevent crash
+  }
 }
 
 async function balanceOf(t) {
@@ -36,8 +42,10 @@ async function approveIfNeeded(token, spender, amt) {
   const c = new ethers.Contract(token, ERC20_ABI, wallet);
   const allowance = await c.allowance(wallet.address, spender);
   if (allowance < amt) {
+    console.log(`🔓 Approving ${token}...`);
     const tx = await c.approve(spender, ethers.MaxUint256);
     await tx.wait();
+    console.log("✅ Approved");
   }
 }
 
@@ -46,10 +54,13 @@ function encodePrice(p) {
 }
 
 async function swapFor(tokenNeeded, amountNeeded) {
+  console.log(`🔄 Swapping USDT for token...`);
   const usdt = TOKENS.USDT;
   const bal = await balanceOf(usdt);
   if (bal < amountNeeded) return false;
+
   await approveIfNeeded(usdt, UNISWAP_ROUTER, amountNeeded);
+
   try {
     const tx = await router.exactInputSingle({
       tokenIn: usdt,
@@ -62,8 +73,10 @@ async function swapFor(tokenNeeded, amountNeeded) {
       sqrtPriceLimitX96: 0
     }, { gasLimit: 500000 });
     await tx.wait();
+    console.log("✅ Swap successful");
     return true;
-  } catch {
+  } catch (e) {
+    console.log("❌ Swap failed:", e.message);
     return false;
   }
 }
@@ -71,28 +84,36 @@ async function swapFor(tokenNeeded, amountNeeded) {
 async function ensureBalance(token, requiredAmount) {
   const bal = await balanceOf(token);
   if (bal >= requiredAmount) return true;
-  if (token !== TOKENS.USDT) {
+
+  if (token.toLowerCase() !== TOKENS.USDT.toLowerCase()) {
+    console.log(`⚠️ Low balance for ${token}. Attempting to buy...`);
+    // Buy 10% more than needed to cover fees
     const shortage = requiredAmount - bal;
     const usdtNeeded = shortage * 110n / 100n;
     return await swapFor(token, usdtNeeded);
   }
+
+  console.log("❌ Insufficient USDT balance");
   return false;
 }
 
 async function createOrder({ tokenIn, tokenOut, amountIn, amountOutMin, price, orderType }) {
   const hasBalance = await ensureBalance(tokenIn, amountIn);
   if (!hasBalance) return null;
+
   await approveIfNeeded(tokenIn, EXECUTOR_ADDRESS, amountIn);
+
   const nextId = Number(await executor.nextOrderId());
   try {
     const tx = await executor.depositAndCreateOrder(
       tokenIn, tokenOut, amountIn, amountOutMin,
       encodePrice(price), 3 * 86400, orderType,
-      { gasLimit: 700000 }
+      { gasLimit: 1000000 }
     );
     await tx.wait();
     return nextId;
-  } catch {
+  } catch (e) {
+    console.log("❌ Create Order Failed:", e.message);
     return null;
   }
 }
@@ -159,11 +180,12 @@ async function fetchOpenOrders() {
           orderType
         });
       }
-    } catch {}
+    } catch { }
   }
   return open;
 }
 
+// ✅ FIXED createDummyOrder
 async function createDummyOrder(token, price, isBuy, currentPrice) {
   let adjustedPrice = price;
   if (isBuy && price >= currentPrice) {
@@ -174,14 +196,25 @@ async function createDummyOrder(token, price, isBuy, currentPrice) {
 
   const tokenIn = isBuy ? TOKENS.USDT : token;
   const tokenOut = isBuy ? token : TOKENS.USDT;
+
   const decimals = await getDecimals(tokenIn);
   const amountIn = ethers.parseUnits(DUMMY_ORDER_AMOUNT.toString(), decimals);
+
+  // 1. CHECK BALANCE
+  const hasBalance = await ensureBalance(tokenIn, amountIn);
+  if (!hasBalance) {
+    console.log(`⚠️ Skipping dummy order: Insufficient balance for ${tokenIn}`);
+    return null;
+  }
+
+  // 2. CHECK APPROVAL
+  await approveIfNeeded(tokenIn, EXECUTOR_ADDRESS, amountIn);
 
   try {
     const tx = await executor.depositAndCreateOrder(
       tokenIn, tokenOut, amountIn, amountIn,
       encodePrice(adjustedPrice), 3 * 86400, isBuy ? 0 : 1,
-      { gasLimit: 900_000 }
+      { gasLimit: 1000000 }
     );
     await tx.wait();
     return Number(await executor.nextOrderId()) - 1;
@@ -203,15 +236,15 @@ async function ensureDummyOrders() {
     const tokenLower = token.toLowerCase();
     const usdtLower = TOKENS.USDT.toLowerCase();
 
-    const buys = open.filter(o => 
-      o.tokenIn === usdtLower && 
-      o.tokenOut === tokenLower && 
+    const buys = open.filter(o =>
+      o.tokenIn === usdtLower &&
+      o.tokenOut === tokenLower &&
       o.orderType === 0
     );
 
-    const sells = open.filter(o => 
-      o.tokenIn === tokenLower && 
-      o.tokenOut === usdtLower && 
+    const sells = open.filter(o =>
+      o.tokenIn === tokenLower &&
+      o.tokenOut === usdtLower &&
       o.orderType === 1
     );
 
@@ -305,11 +338,9 @@ async function setPriceFromLive(symbol, tokenA, market) {
 
 async function main() {
   console.log("\n🔄 Starting price update cycle...");
-  
-  // Create dummy orders first
+
   await ensureDummyOrders();
-  
-  // Then update prices
+
   const market = await getMarketPrices();
   if (!market) {
     console.log("❌ Failed to fetch market prices");
@@ -321,7 +352,7 @@ async function main() {
       await setPriceFromLive(symbol, token, market);
     }
   }
-  
+
   console.log("\n✅ Cycle complete");
 }
 
