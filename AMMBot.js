@@ -71,60 +71,117 @@ async function getBalance(token) {
 // --- CORE FUNCTIONS ---
 
 async function ensureDummyOrders(token, symbol, marketPrice) {
-    console.log(`🔍 Checking Depth [${symbol}]...`);
-    const nextId = Number(await contracts.executor.nextOrderId());
-    
-    let buys = 0, sells = 0;
-    const limit = Math.max(1, nextId - 500); 
-    const BATCH_SIZE = 50;
+    console.log(`\n🔍 Checking Depth [${symbol}] via Events...`);
 
-    for (let i = nextId - 1; i >= limit; i -= BATCH_SIZE) {
-        const batch = [];
-        for (let j = 0; j < BATCH_SIZE && (i - j) >= limit; j++) batch.push(contracts.executor.getOrder(i - j).catch(() => null));
+    const decT = await getDecimals(token);
+    const decU = await getDecimals(TOKENS.USDT);
+    const uAddr = TOKENS.USDT.toLowerCase();
+    const tAddr = token.toLowerCase();
+
+    // --- STEP 1: Find Relevant IDs via Logs ---
+    const relevantIds = [];
+    
+    try {
+        const currentBlock = await provider.getBlockNumber();
+        const LOOKBACK = 50000; 
         
-        const results = await Promise.all(batch);
-        for (const o of results) {
-            if (!o || o.filled || o.cancelled || o.amountIn === 0n) continue;
-            const tIn = o.tokenIn.toLowerCase(), tOut = o.tokenOut.toLowerCase(), u = TOKENS.USDT.toLowerCase(), t = token.toLowerCase();
-            if(tIn === u && tOut === t) buys++;
-            if(tIn === t && tOut === u) sells++;
+        // ✅ FIX: Ensure we don't calculate a negative block number
+        const fromBlock = Math.max(0, currentBlock - LOOKBACK);
+        
+        console.log(`   Scanning Blocks: ${fromBlock} to ${currentBlock}`);
+
+        // Ensure your ABI has the event "OrderCreated" defined correctly!
+        const filter = contracts.executor.filters.OrderCreated(); 
+        const logs = await contracts.executor.queryFilter(filter, fromBlock, currentBlock);
+
+        for (const log of logs) {
+            const args = log.args; 
+            
+            // Adjust indices based on your specific ABI event structure
+            // Example assuming: event OrderCreated(uint256 id, address user, address tokenIn, address tokenOut, ...)
+            const id = Number(args[0]); 
+            const tIn = String(args[2]).toLowerCase();
+            const tOut = String(args[3]).toLowerCase();
+
+            // Filter for our specific pair
+            if ((tIn === uAddr && tOut === tAddr) || (tIn === tAddr && tOut === uAddr)) {
+                relevantIds.push(id);
+            }
         }
+        
+        relevantIds.sort((a, b) => b - a); // Newest first
+        console.log(`   Found ${relevantIds.length} orders for ${symbol} in logs`);
+
+    } catch (e) {
+        console.error("   ⚠️ Event fetch failed. Falling back to simple scan.", e.message);
+        // Fallback: Scan the last 50 IDs manually if events fail
+        const nextId = Number(await contracts.executor.nextOrderId());
+        for(let i=1; i<=50; i++) relevantIds.push(nextId - i);
+    }
+
+    // --- STEP 2: Check Status (Same as before) ---
+    let buys = 0, sells = 0;
+    
+    // Check mostly the latest ones we found
+    const idsToCheck = relevantIds.slice(0, 20); 
+
+    const promises = idsToCheck.map(id => {
+        if(id < 0) return null;
+        return contracts.executor.getOrder(id).catch(() => null)
+    });
+    
+    const orders = await Promise.all(promises);
+
+    for (const o of orders) {
+        if (!o || o.filled || o.cancelled || o.amountIn === 0n) continue;
+
+        const tIn = o.tokenIn.toLowerCase();
+        const tOut = o.tokenOut.toLowerCase();
+
+        if (tIn === uAddr && tOut === tAddr) buys++;
+        if (tIn === tAddr && tOut === uAddr) sells++;
     }
 
     console.log(`📊 Depth: ${buys} Buys | ${sells} Sells`);
-    const decT = await getDecimals(token);
-    const decU = await getDecimals(TOKENS.USDT);
+
+    // --- STEP 3: Create Orders (Same Logic) ---
     const amtT = ethers.parseUnits(DUMMY_AMOUNT.toString(), decT);
     const amtU = ethers.parseUnits((DUMMY_AMOUNT * marketPrice).toFixed(6), decU);
 
-    if(buys < 5) {
+    if (buys < 5) {
         const needed = 5 - buys;
         console.log(`➕ Creating ${needed} BUYs...`);
         const bal = await getBalance(TOKENS.USDT);
-        if(bal >= amtU * BigInt(needed)) {
+        if (bal >= amtU * BigInt(needed)) {
             await approve(TOKENS.USDT, EXECUTOR_ADDR, amtU * 10n);
-            const stairs = [0.98, 0.95, 0.92, 0.90, 0.88]; 
-            for(let i=0; i<needed; i++) {
+            const stairs = [0.98, 0.95, 0.92, 0.90, 0.88];
+            for (let i = 0; i < needed; i++) {
                 const p = stairs[i % stairs.length];
                 const price = ethers.parseUnits((marketPrice * p).toFixed(4), 18);
-                await sendTx((async() => contracts.executor.depositAndCreateOrder(TOKENS.USDT, token, amtU, amtT, price, 86400*3, 0, await getOpts(400000)))(), `Dummy Buy ${symbol}`);
+                await sendTx(
+                    contracts.executor.depositAndCreateOrder(TOKENS.USDT, token, amtU, amtT, price, 86400 * 3, 0, await getOpts(400000)),
+                    `Dummy Buy ${symbol} @ $${(marketPrice * p).toFixed(2)}`
+                );
             }
-        } else { console.warn(`⚠️ Insufficient USDT for dummy orders.`); }
+        }
     }
 
-    if(sells < 5) {
+    if (sells < 5) {
         const needed = 5 - sells;
         console.log(`➕ Creating ${needed} SELLs...`);
         const bal = await getBalance(token);
-        if(bal >= amtT * BigInt(needed)) {
+        if (bal >= amtT * BigInt(needed)) {
             await approve(token, EXECUTOR_ADDR, amtT * 10n);
             const stairs = [1.02, 1.05, 1.08, 1.10, 1.12];
-            for(let i=0; i<needed; i++) {
+            for (let i = 0; i < needed; i++) {
                 const p = stairs[i % stairs.length];
                 const price = ethers.parseUnits((marketPrice * p).toFixed(4), 18);
-                await sendTx((async() => contracts.executor.depositAndCreateOrder(token, TOKENS.USDT, amtT, amtU, price, 86400*3, 1, await getOpts(400000)))(), `Dummy Sell ${symbol}`);
+                await sendTx(
+                    contracts.executor.depositAndCreateOrder(token, TOKENS.USDT, amtT, amtU, price, 86400 * 3, 1, await getOpts(400000)),
+                    `Dummy Sell ${symbol} @ $${(marketPrice * p).toFixed(2)}`
+                );
             }
-        } else { console.warn(`⚠️ Insufficient ${symbol} for dummy orders.`); }
+        }
     }
 }
 
@@ -235,4 +292,4 @@ async function main() {
 
 console.log("🟢 SuperBot Started");
 main();
-setInterval(main, 300000);
+setInterval(main, 300);
