@@ -279,7 +279,7 @@ async function main() {
             console.log(`\n🔹 ${symbol} @ $${price}`);
             await ensureDummyOrders(addr, symbol, price);
             await updateLimitPrice(addr, symbol, price);
-            await alignUniswapPool(addr, symbol, price);
+            // await alignUniswapPool(addr, symbol, price);
         }
     } catch (e) { console.error("Cycle Error:", e.message); }
     
