@@ -14,7 +14,7 @@ const COINGECKO_IDS = {
   TRX: "tron",
   ADA: "cardano",
   HYPE: "hyperliquid",
-  USDE: "usde",
+  USDE: "ethena-usde",
   LINK: "chainlink",
   AVAX: "avalanche-2",
   XLM: "stellar",
