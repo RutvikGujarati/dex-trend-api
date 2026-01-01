@@ -8,9 +8,9 @@ dotenv.config();
 const require = createRequire(import.meta.url);
 
 const { RPC_URL, PRIVATE_KEY } = process.env;
-const EXECUTOR_ADDR = "0x59AEeACD225bD2b2B178B2cDa53D6c6759bB2966"; 
-const ROUTER_ADDR = "0x81Ba02Ca510a58560D183F0F5eE42E47D1846245";   
-const FACTORY_ADDR = "0x339A0Da8ffC7a6fc98Bf2FC53a17dEEf36F0D9c3";  
+const EXECUTOR_ADDR = "0x59AEeACD225bD2b2B178B2cDa53D6c6759bB2966";
+const ROUTER_ADDR = "0x81Ba02Ca510a58560D183F0F5eE42E47D1846245";
+const FACTORY_ADDR = "0x339A0Da8ffC7a6fc98Bf2FC53a17dEEf36F0D9c3";
 const FEE = 500;
 const DUMMY_AMOUNT = 0.0001;
 
@@ -22,7 +22,7 @@ const ERC20_ABI = [
 ];
 
 const LIMIT_ORDER_ABI = [
-    ...require("./ABI/LimitOrder.json"), 
+    ...require("./ABI/LimitOrder.json"),
     "function getLastExecutedPrice(address tokenA, address tokenB) view returns (uint256 price1e18, uint256 blockNum, uint256 buyOrderId, uint256 sellOrderId)"
 ];
 
@@ -41,7 +41,7 @@ const contracts = {
     factory: new ethers.Contract(FACTORY_ADDR, FACTORY_ABI, wallet)
 };
 
-let isRunning = false; 
+let isRunning = false;
 
 async function sendTx(txPromise, desc = "Tx", gasLimit = 500000) {
     try {
@@ -62,7 +62,7 @@ async function getOpts(gasLimit = 800000) {
 }
 
 async function getDecimals(addr) {
-    try { return Number(await new ethers.Contract(addr, ERC20_ABI, provider).decimals()); } 
+    try { return Number(await new ethers.Contract(addr, ERC20_ABI, provider).decimals()); }
     catch { return 18; }
 }
 
@@ -82,7 +82,7 @@ async function getBalance(token) {
 async function scanFullDepth(token) {
     const nextId = Number(await contracts.executor.nextOrderId());
     const BATCH_SIZE = 50;
-    
+
     let buys = 0;
     let sells = 0;
 
@@ -98,11 +98,11 @@ async function scanFullDepth(token) {
         }
 
         const results = await Promise.all(batch);
-        
+
         for (const o of results) {
             const amountIn = o ? (o.amountIn || o[5]) : 0n;
             if (!o || o.filled || o.cancelled || amountIn === 0n) continue;
-            
+
             const rawIn = o.tokenIn || o[2];
             const rawOut = o.tokenOut || o[3];
             if (!rawIn || !rawOut) continue;
@@ -134,7 +134,7 @@ async function ensureDummyOrders(token, symbol, marketPrice) {
         const bal = await getBalance(TOKENS.USDT);
         if (bal >= amtU_Dummy * BigInt(needed)) {
             await approve(TOKENS.USDT, EXECUTOR_ADDR, amtU_Dummy * BigInt(needed));
-            const stairs = [0.98, 0.95, 0.92, 0.90, 0.88]; 
+            const stairs = [0.98, 0.95, 0.92, 0.90, 0.88];
             for (let i = 0; i < needed; i++) {
                 const p = stairs[i % stairs.length];
                 const price = ethers.parseUnits((marketPrice * p).toFixed(4), 18);
@@ -158,17 +158,20 @@ async function ensureDummyOrders(token, symbol, marketPrice) {
         }
     }
 }
-
 async function updateLimitPrice(token, symbol, marketPrice) {
     try {
         const result = await contracts.executor.getLastExecutedPrice(token, TOKENS.USDT);
-        const price1e18 = result[0]; 
-        const contractPrice = Number(ethers.formatUnits(price1e18, 18)); 
+        const price1e18 = result[0];
+        const contractPrice = Number(ethers.formatUnits(price1e18, 18));
         const diff = contractPrice === 0 ? 1 : Math.abs(contractPrice - marketPrice) / marketPrice;
 
-        console.log(`   ⚖️ Contract: $${contractPrice.toFixed(4)} | Market: $${marketPrice} | Diff: ${(diff*100).toFixed(2)}%`);
+        // --- ⚡ DYNAMIC THRESHOLD LOGIC ---
+        // If price < $0.10, allow 5% diff (0.05). Else allow 0.5% (0.005)
+        const THRESHOLD = marketPrice < 0.1 ? 0.05 : 0.005;
 
-        if (diff < 0.005) {
+        console.log(`   ⚖️ Contract: $${contractPrice.toFixed(4)} | Market: $${marketPrice} | Diff: ${(diff * 100).toFixed(2)}% (Limit: ${(THRESHOLD * 100)}%)`);
+
+        if (diff < THRESHOLD) {
             console.log(`   ✅ Price Aligned.`);
             return;
         }
@@ -180,86 +183,19 @@ async function updateLimitPrice(token, symbol, marketPrice) {
         const amountU = ethers.parseUnits(marketPrice.toFixed(6), decU);
 
         const balU = await getBalance(TOKENS.USDT);
-        if(balU >= amountU) {
+        if (balU >= amountU) {
             await approve(TOKENS.USDT, EXECUTOR_ADDR, amountU);
             await sendTx(contracts.executor.depositAndCreateOrder(TOKENS.USDT, token, amountU, amountT, ethers.parseUnits(marketPrice.toFixed(4), 18), 86400, 0, await getOpts(500000)), `Limit Buy ${symbol}`);
         }
 
         const balT = await getBalance(token);
-        if(balT >= amountT) {
+        if (balT >= amountT) {
             await approve(token, EXECUTOR_ADDR, amountT);
             await sendTx(contracts.executor.depositAndCreateOrder(token, TOKENS.USDT, amountT, amountU, ethers.parseUnits(marketPrice.toFixed(4), 18), 86400, 1, await getOpts(500000)), `Limit Sell ${symbol}`);
         }
     } catch (e) {
-        console.error(`   ❌ Limit Check Error:`, e.message);
+        console.error(`   ❌ Failed to check contract price:`, e.message);
     }
-}
-
-async function alignUniswapPool(token, symbol, marketPrice) {
-    if (token.toLowerCase() === TOKENS.USDT.toLowerCase()) return;
-    try {
-        const poolAddr = await contracts.factory.getPool(token, TOKENS.USDT, FEE);
-        if (poolAddr === ethers.ZeroAddress) return;
-
-        const pool = new ethers.Contract(poolAddr, POOL_ABI, provider);
-        const [sqrtPriceX96, , , , , , ] = await pool.slot0();
-        const liquidity = await pool.liquidity(); 
-        
-        const decT = await getDecimals(token);
-        const decU = await getDecimals(TOKENS.USDT);
-        const isToken0 = token.toLowerCase() < TOKENS.USDT.toLowerCase();
-
-        const priceRatio = (Number(sqrtPriceX96) ** 2) / (2 ** 192);
-        const v3Price = isToken0 ? priceRatio * (10 ** (decU - decT)) : (1 / priceRatio) * (10 ** (decT - decU));
-        const diff = Math.abs(v3Price - marketPrice) / marketPrice;
-        
-        console.log(`   🦄 V3: $${v3Price.toFixed(4)} | Diff: ${(diff*100).toFixed(2)}%`);
-        
-        if (diff > 0.005) { 
-            console.log(`   ⚡ Aligning V3 (Exact Calc)...`);
-            
-            const targetRatio = isToken0 ? marketPrice / (10 ** (decU - decT)) : (1 / marketPrice) / (10 ** (decT - decU));
-            const targetSqrt = BigInt(Math.floor(Math.sqrt(targetRatio) * (2 ** 96)));
-            const currentSqrt = BigInt(sqrtPriceX96);
-            
-            const tokenIn = v3Price < marketPrice ? TOKENS.USDT : token;
-            const tokenOut = v3Price < marketPrice ? token : TOKENS.USDT;
-            
-            const Q96 = 2n ** 96n;
-            let exactAmountIn = 0n;
-
-            if (targetSqrt > currentSqrt) {
-                exactAmountIn = (BigInt(liquidity) * (targetSqrt - currentSqrt)) / Q96;
-            } else {
-                const num = BigInt(liquidity) * (currentSqrt - targetSqrt) * Q96;
-                const den = currentSqrt * targetSqrt;
-                exactAmountIn = num / den;
-            }
-
-            const amountWithFee = (exactAmountIn * 1000000n) / 999500n;
-            const finalAmount = (amountWithFee * 102n) / 100n;
-
-            const balance = await getBalance(tokenIn);
-            const amountIn = finalAmount > balance ? balance : finalAmount;
-
-            if (amountIn === 0n) return;
-
-            console.log(`   🧮 Needed: ${ethers.formatUnits(amountIn, tokenIn === TOKENS.USDT ? decU : decT)}`);
-
-            await approve(tokenIn, ROUTER_ADDR, amountIn);
-            
-            await sendTx(
-                contracts.router.exactInputSingle({
-                    tokenIn, tokenOut, fee: FEE, recipient: wallet.address,
-                    deadline: Math.floor(Date.now()/1000)+300, 
-                    amountIn, 
-                    amountOutMinimum: 0, 
-                    sqrtPriceLimitX96: targetSqrt 
-                }, await getOpts(1500000)), 
-                `Align ${symbol}`
-            );
-        }
-    } catch (e) { console.error(`❌ Align Error:`, e.message); }
 }
 
 async function main() {
@@ -270,7 +206,7 @@ async function main() {
     try {
         const ids = Object.values(COINGECKO_IDS).join(",");
         const { data } = await axios.get(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`);
-        
+
         for (const [symbol, addr] of Object.entries(TOKENS)) {
             if (symbol === "USDT") continue;
             const price = data[COINGECKO_IDS[symbol]]?.usd;
@@ -279,10 +215,9 @@ async function main() {
             console.log(`\n🔹 ${symbol} @ $${price}`);
             await ensureDummyOrders(addr, symbol, price);
             await updateLimitPrice(addr, symbol, price);
-            // await alignUniswapPool(addr, symbol, price);
         }
     } catch (e) { console.error("Cycle Error:", e.message); }
-    
+
     isRunning = false;
 }
 
