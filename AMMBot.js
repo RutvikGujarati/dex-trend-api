@@ -165,7 +165,6 @@ async function updateLimitPrice(token, symbol, marketPrice) {
         const contractPrice = Number(ethers.formatUnits(price1e18, 18));
         const diff = contractPrice === 0 ? 1 : Math.abs(contractPrice - marketPrice) / marketPrice;
 
-        // --- ⚡ DYNAMIC THRESHOLD LOGIC ---
         // If price < $0.10, allow 5% diff (0.05). Else allow 0.5% (0.005)
         const THRESHOLD = marketPrice < 0.1 ? 0.05 : 0.005;
 
@@ -179,19 +178,27 @@ async function updateLimitPrice(token, symbol, marketPrice) {
         console.log(`   ⚠️ Price Misaligned. Sending Limits...`);
         const decT = await getDecimals(token);
         const decU = await getDecimals(TOKENS.USDT);
-        const amountT = ethers.parseUnits("1", decT);
-        const amountU = ethers.parseUnits(marketPrice.toFixed(6), decU);
+
+        const amountT = ethers.parseUnits(DUMMY_AMOUNT.toString(), decT);
+
+        const amountU = ethers.parseUnits((DUMMY_AMOUNT * marketPrice).toFixed(6), decU);
 
         const balU = await getBalance(TOKENS.USDT);
         if (balU >= amountU) {
             await approve(TOKENS.USDT, EXECUTOR_ADDR, amountU);
-            await sendTx(contracts.executor.depositAndCreateOrder(TOKENS.USDT, token, amountU, amountT, ethers.parseUnits(marketPrice.toFixed(4), 18), 86400, 0, await getOpts(500000)), `Limit Buy ${symbol}`);
+            await sendTx(
+                contracts.executor.depositAndCreateOrder(TOKENS.USDT, token, amountU, amountT, ethers.parseUnits(marketPrice.toFixed(4), 18), 86400, 0, await getOpts(500000)),
+                `Limit Buy ${symbol}`
+            );
         }
 
         const balT = await getBalance(token);
         if (balT >= amountT) {
             await approve(token, EXECUTOR_ADDR, amountT);
-            await sendTx(contracts.executor.depositAndCreateOrder(token, TOKENS.USDT, amountT, amountU, ethers.parseUnits(marketPrice.toFixed(4), 18), 86400, 1, await getOpts(500000)), `Limit Sell ${symbol}`);
+            await sendTx(
+                contracts.executor.depositAndCreateOrder(token, TOKENS.USDT, amountT, amountU, ethers.parseUnits(marketPrice.toFixed(4), 18), 86400, 1, await getOpts(500000)),
+                `Limit Sell ${symbol}`
+            );
         }
     } catch (e) {
         console.error(`   ❌ Failed to check contract price:`, e.message);
