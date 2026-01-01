@@ -165,8 +165,8 @@ async function updateLimitPrice(token, symbol, marketPrice) {
         const contractPrice = Number(ethers.formatUnits(price1e18, 18));
         const diff = contractPrice === 0 ? 1 : Math.abs(contractPrice - marketPrice) / marketPrice;
 
-        // If price < $0.10, allow 5% diff (0.05). Else allow 0.5% (0.005)
-        const THRESHOLD = marketPrice < 0.1 ? 0.05 : 0.005;
+        // If price < $0.10, allow 3% diff (0.03). Else allow 0.5% (0.005)
+        const THRESHOLD = marketPrice < 0.7 ? 0.03 : 0.005;
 
         console.log(`   ⚖️ Contract: $${contractPrice.toFixed(4)} | Market: $${marketPrice} | Diff: ${(diff * 100).toFixed(2)}% (Limit: ${(THRESHOLD * 100)}%)`);
 
